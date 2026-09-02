@@ -8,35 +8,72 @@ GAME_HEIGHT = 720
 
 TARGET_FPS = 60
 
-# Hand tracking — lower thresholds hold up better during fast swipes.
+# Hand tracking. Detection is permissive so fast swipes re-acquire quickly;
+# presence/tracking are stricter so half-baked landmarks are rejected.
 HAND_MIN_DETECTION = 0.3
-HAND_MIN_PRESENCE = 0.3
-HAND_MIN_TRACKING = 0.3
+HAND_MIN_PRESENCE = 0.5
+HAND_MIN_TRACKING = 0.4
 # Keep using the last tip briefly when MediaPipe drops a few frames.
-HAND_COAST_MS = 180
+HAND_COAST_MS = 200
+# Cap coast velocity so a noisy last frame doesn't fling the cursor.
+HAND_MAX_COAST_SPEED = 2000.0
+# Coast velocity decays with this time constant, bounding overshoot to about
+# speed * decay when the hand reverses during dropped frames.
+HAND_COAST_DECAY_MS = 70
 # Infer closer to full res so upright fingertips stay sharp.
 HAND_INFER_MAX_WIDTH = 1280
-# Tip EMA; lower = smoother (helps upright / foreshortened fingers).
-HAND_TIP_SMOOTHING = 0.45
-# Ignore single-frame tip teleports (pixels at camera resolution).
-HAND_MAX_TIP_JUMP = 120.0
-# Cap coast velocity so flicker doesn't fling the cursor.
-HAND_MAX_COAST_SPEED = 2500.0
-# Stick to the current pointer finger unless another is clearly more extended.
-HAND_POINTER_LOCK_FRAMES = 10
-HAND_POINTER_SWITCH_MARGIN = 0.35
-# Soft preference for the anatomical index when scores are close.
-HAND_INDEX_BIAS = 12.0
-# Curl vs extend: tip must reach this far past the PIP (ratio tip-mcp / pip-mcp).
-HAND_EXTEND_RATIO = 1.45
-# PIP joint must bend past this cos threshold to count as extended (more negative = straighter).
-HAND_EXTEND_PIP_COS = -0.15
 
+# When the full-frame detector loses the hand (typically in front of the face
+# or hair), re-detect inside a crop around the last known hand for this long.
+HAND_SEARCH_MS = 700
+# Crop is this many times the last hand's bounding box, at least this big.
+HAND_SEARCH_SCALE = 2.5
+HAND_SEARCH_MIN_PX = 360
+# The crop has little clutter, so accept slightly weaker landmark presence.
+HAND_ROI_MIN_PRESENCE = 0.4
+
+# One Euro filter on the fingertip (camera pixels). Lower min_cutoff = steadier
+# at rest; higher beta = follows fast swipes more tightly.
+ONE_EURO_MIN_CUTOFF = 1.0
+ONE_EURO_BETA = 0.035
+# Velocity estimate cutoff; higher tracks direction changes faster.
+ONE_EURO_D_CUTOFF = 5.0
+# How much the filter opens up sideways relative to along the swipe (0..1).
+# Lower = straighter swipes; too low and curved swipes feel stiff.
+ONE_EURO_LATERAL_SCALE = 0.2
+# Cross-track deviation (camera px) at which sideways motion is treated as a
+# real turn rather than wobble and gets full responsiveness.
+ONE_EURO_LATERAL_GATE_PX = 12.0
+
+# Palm-anchored tip. The tip is tracked as palm center + offset; the offset
+# cutoff falls from SLOW (finger free to bend at rest) to FAST (offset nearly
+# frozen) as speed approaches SPEED_FULL px/s, so a blurred tip landmark that
+# drops toward the palm mid-swipe doesn't yank the cursor.
+TIP_ANCHOR_CUTOFF_SLOW = 4.0
+TIP_ANCHOR_CUTOFF_FAST = 0.5
+TIP_ANCHOR_SPEED_FULL = 1000.0
+
+# Pointer finger: a finger only takes over when its tip reaches this many
+# times farther from the wrist than the next-best finger, for this many
+# consecutive frames. Returning to index only needs one clear frame.
+HAND_POINTER_DOMINANCE = 1.25
+HAND_POINTER_SWITCH_FRAMES = 5
+
+# Legacy exponential smoother alpha (kept for debug comparisons).
 SMOOTHING_ALPHA = 0.4
 
+# Blade becomes active at or above this path speed (game px / s).
 MIN_SWIPE_VELOCITY = 500
+# Keep the blade lit briefly after speed drops so a continuous slash doesn't
+# flicker off between camera frames.
+SWIPE_HOLD_MS = 80
 
 BLADE_HISTORY_MS = 150
+BLADE_THICKNESS = 3
+# Skip trail points that barely moved (duplicate CV frames).
+BLADE_MIN_STEP_PX = 1.5
+# Interpolated sub-steps between trail samples when drawing the curve.
+BLADE_CURVE_SEGMENTS = 8
 
 FRUIT_MIN_SPAWN_INTERVAL = 1.0
 FRUIT_MAX_SPAWN_INTERVAL = 2.0
