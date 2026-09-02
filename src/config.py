@@ -8,6 +8,15 @@ GAME_HEIGHT = 720
 
 TARGET_FPS = 60
 
+# Hand tracking — lower thresholds hold up better during fast swipes.
+HAND_MIN_DETECTION = 0.3
+HAND_MIN_PRESENCE = 0.3
+HAND_MIN_TRACKING = 0.3
+# Keep using the last tip briefly when MediaPipe drops a few frames.
+HAND_COAST_MS = 160
+# Infer on a smaller frame for higher CV FPS (coords scaled back).
+HAND_INFER_MAX_WIDTH = 960
+
 SMOOTHING_ALPHA = 0.4
 
 MIN_SWIPE_VELOCITY = 500

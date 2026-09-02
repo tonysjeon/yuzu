@@ -23,6 +23,8 @@ Use `python3.11` instead if that is what you have installed.
 python main.py
 ```
 
-Shows a mirrored webcam preview from the Mac's built-in camera (Continuity Camera / iPhone is skipped). Press `q` to quit.
+Shows a mirrored webcam preview from the Mac's built-in camera with hand
+landmarks and index-fingertip overlay. Continuity Camera / iPhone is skipped.
+Press `q` to quit.
 
 If the camera fails to open on macOS, enable **Camera** access for Terminal (or Cursor) under **System Settings → Privacy & Security → Camera**, then rerun.
