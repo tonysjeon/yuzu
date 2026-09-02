@@ -1,37 +1,27 @@
-"""Run the Yuzu webcam preview with hand tracking."""
+"""Run yuzu: webcam hand tracking driving the game window."""
 
 from __future__ import annotations
 
 import sys
 
-import cv2
-import numpy as np
-
+from game.game import Game
 from src.camera import Camera
-from src.hand_tracker import HandTracker, draw_hand_overlay
+from src.hand_tracker import HandTracker
 
 
-def _window_size(window_name: str) -> tuple[int, int] | None:
-    try:
-        rect = cv2.getWindowImageRect(window_name)
-    except cv2.error:
-        return None
-    # rect = (x, y, width, height)
-    width, height = int(rect[2]), int(rect[3])
-    if width <= 1 or height <= 1:
-        return None
-    return width, height
-
-
-def _fit_to_window(frame: np.ndarray, window_name: str) -> np.ndarray:
-    """Scale the frame to fill the current window without letterboxing."""
-    size = _window_size(window_name)
-    if size is None:
-        return frame
-    width, height = size
-    if frame.shape[1] == width and frame.shape[0] == height:
-        return frame
-    return cv2.resize(frame, (width, height), interpolation=cv2.INTER_LINEAR)
+def _map_to_game(
+    tip: tuple[float, float],
+    camera_width: int,
+    camera_height: int,
+    game_width: int,
+    game_height: int,
+) -> tuple[float, float]:
+    """Simple scale from camera pixels into the game surface."""
+    x = tip[0] / max(camera_width, 1) * game_width
+    y = tip[1] / max(camera_height, 1) * game_height
+    x = min(max(x, 0.0), game_width - 1.0)
+    y = min(max(y, 0.0), game_height - 1.0)
+    return x, y
 
 
 def main() -> int:
@@ -48,12 +38,11 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 1
 
-    window_name = "yuzu"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, camera.width, camera.height)
-
+    game = Game()
     try:
-        while True:
+        while game.running:
+            game.handle_events()
+
             frame = camera.read()
             if frame is None:
                 print(
@@ -64,17 +53,27 @@ def main() -> int:
                 return 1
 
             hand = tracker.process(frame)
-            draw_hand_overlay(frame, hand)
-            display = _fit_to_window(frame, window_name)
+            if hand["detected"] and hand["index_tip"] is not None:
+                game.set_fingertip(
+                    _map_to_game(
+                        hand["index_tip"],
+                        camera.width,
+                        camera.height,
+                        game.width,
+                        game.height,
+                    ),
+                    pointer_finger=hand.get("pointer_finger"),
+                )
+            else:
+                game.set_fingertip(None)
 
-            cv2.imshow(window_name, display)
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
+            game.update()
+            game.render()
+            game.tick()
     finally:
         tracker.close()
         camera.release()
-        cv2.destroyAllWindows()
+        game.quit()
 
     return 0
 
