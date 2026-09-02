@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from game.game import Game
 from src import config
+from src.blade import Blade
 from src.camera import Camera
 from src.coordinate_mapper import CoordinateMapper
 from src.hand_tracker import HandTracker
+from src.swipe_detector import SwipeDetector
 
 
 def main() -> int:
@@ -33,6 +36,8 @@ def main() -> int:
         game_height=game.height,
         active_region=config.ACTIVE_REGION,
     )
+    blade = Blade()
+    swipe = SwipeDetector()
 
     try:
         while game.running:
@@ -47,17 +52,34 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # Stamp after the blocking read so timing matches the frame.
+            now = time.perf_counter()
 
             hand = tracker.process(frame)
             if hand["detected"] and hand["index_tip"] is not None:
                 tip_x, tip_y = hand["index_tip"]
+                mapped = mapper.map(tip_x, tip_y)
                 game.set_fingertip(
-                    mapper.map(tip_x, tip_y),
+                    mapped,
                     pointer_finger=hand.get("pointer_finger"),
+                )
+                blade.add(
+                    mapped[0],
+                    mapped[1],
+                    timestamp=now,
+                    confidence=float(hand.get("confidence") or 0.0),
                 )
             else:
                 game.set_fingertip(None)
+                blade.expire(now)
+                swipe.reset()
 
+            swipe_result = swipe.update(blade.points, now=now)
+            game.set_blade_points(
+                blade.curve() if swipe_result.active else [],
+                active=swipe_result.active,
+                velocity=swipe_result.velocity,
+            )
             game.update()
             game.render()
             game.tick()

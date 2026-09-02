@@ -14,11 +14,11 @@ from mediapipe.tasks.python.vision import HandLandmarksConnections
 from mediapipe.tasks.python.vision.drawing_utils import draw_landmarks
 
 from src import config
+from src.smoothing import AnchoredTip, OneEuroFilter
 
-INDEX_MCP = 5
-INDEX_PIP = 6
-INDEX_DIP = 7
 INDEX_TIP = 8
+# Wrist plus the four finger MCP joints: large, blur-resistant structure.
+_PALM_POINTS = (0, 5, 9, 13, 17)
 
 # tip, pip, dip, mcp for each non-thumb finger
 _FINGER_CHAINS: dict[str, tuple[int, int, int, int]] = {
@@ -39,6 +39,7 @@ _DEFAULT_MODEL = (
 class HandResult(TypedDict):
     detected: bool
     index_tip: tuple[float, float] | None
+    raw_tip: tuple[float, float] | None
     confidence: float
     landmarks: list[tuple[float, float, float]]
     coasted: bool
@@ -50,95 +51,27 @@ def _xy(landmarks: list[tuple[float, float, float]], index: int) -> np.ndarray:
     return np.array([point[0], point[1]], dtype=np.float64)
 
 
-def _extension_score(
+def _palm_center(landmarks: list[tuple[float, float, float]]) -> tuple[float, float]:
+    xs = [landmarks[i][0] for i in _PALM_POINTS]
+    ys = [landmarks[i][1] for i in _PALM_POINTS]
+    return sum(xs) / len(xs), sum(ys) / len(ys)
+
+
+def _reach(
     landmarks: list[tuple[float, float, float]],
     tip_i: int,
-    pip_i: int,
-    mcp_i: int,
 ) -> float:
-    """How extended a finger is (higher = more pointing)."""
+    """Tip distance from the wrist, normalized by palm size.
+
+    In a pointing pose the pointing finger reaches far past the curled ones,
+    which stay clustered near the palm. Distance is far more robust to blur
+    and foreshortening than joint angles.
+    """
     wrist = _xy(landmarks, 0)
-    tip = _xy(landmarks, tip_i)
-    pip = _xy(landmarks, pip_i)
-    mcp = _xy(landmarks, mcp_i)
-    wrist_tip = float(np.linalg.norm(tip - wrist))
-    wrist_pip = float(np.linalg.norm(pip - wrist))
-    tip_mcp = float(np.linalg.norm(tip - mcp))
-    pip_mcp = float(np.linalg.norm(pip - mcp))
-    # Extended fingers stick farther past the PIP / MCP than curled ones.
-    return (wrist_tip - wrist_pip) + 0.35 * (tip_mcp - pip_mcp)
-
-
-def _is_finger_extended(
-    landmarks: list[tuple[float, float, float]],
-    tip_i: int,
-    pip_i: int,
-    dip_i: int,
-    mcp_i: int,
-    extend_ratio: float = config.HAND_EXTEND_RATIO,
-    pip_cos_max: float = config.HAND_EXTEND_PIP_COS,
-) -> bool:
-    """True when a finger looks outstretched, not curled into the palm."""
-    tip = _xy(landmarks, tip_i)
-    pip = _xy(landmarks, pip_i)
-    dip = _xy(landmarks, dip_i)
-    mcp = _xy(landmarks, mcp_i)
-
-    tip_mcp = float(np.linalg.norm(tip - mcp))
-    pip_mcp = float(np.linalg.norm(pip - mcp))
-    if pip_mcp < 1.0 or tip_mcp < pip_mcp * extend_ratio:
-        return False
-
-    # Angle at PIP: extended fingers fold open (tip goes away from MCP).
-    a = mcp - pip
-    b = tip - pip
-    na = float(np.linalg.norm(a))
-    nb = float(np.linalg.norm(b))
-    if na < 1.0 or nb < 1.0:
-        return False
-    cos_pip = float(np.dot(a, b) / (na * nb))
-    if cos_pip > pip_cos_max:
-        return False
-
-    # Curled tips collapse near the DIP/MCP cluster.
-    tip_dip = float(np.linalg.norm(tip - dip))
-    dip_pip = float(np.linalg.norm(dip - pip))
-    if tip_dip + dip_pip < pip_mcp * 0.55:
-        return False
-
-    return True
-
-
-def _stabilize_finger_tip(
-    landmarks: list[tuple[float, float, float]],
-    tip_i: int,
-    pip_i: int,
-    dip_i: int,
-    mcp_i: int,
-) -> tuple[float, float]:
-    """Blend the raw tip with a bone-axis estimate for one finger."""
-    raw = _xy(landmarks, tip_i)
-    mcp = _xy(landmarks, mcp_i)
-    pip = _xy(landmarks, pip_i)
-    dip = _xy(landmarks, dip_i)
-
-    axis = dip - mcp
-    axis_len = float(np.linalg.norm(axis))
-    if axis_len < 1e-3:
-        return float(raw[0]), float(raw[1])
-
-    unit = axis / axis_len
-    segment = float(np.linalg.norm(dip - pip))
-    if segment < 1.0:
-        segment = float(np.linalg.norm(pip - mcp)) * 0.5
-    if segment < 1.0:
-        segment = axis_len * 0.35
-
-    constrained = dip + unit * segment
-    upright = abs(float(unit[1]))
-    blend = 0.30 + 0.50 * upright
-    tip = (1.0 - blend) * raw + blend * constrained
-    return float(tip[0]), float(tip[1])
+    palm = float(np.linalg.norm(_xy(landmarks, 9) - wrist))  # wrist -> middle MCP
+    if palm < 1.0:
+        return 0.0
+    return float(np.linalg.norm(_xy(landmarks, tip_i) - wrist)) / palm
 
 
 class HandTracker:
@@ -152,13 +85,9 @@ class HandTracker:
         min_presence_confidence: float = config.HAND_MIN_PRESENCE,
         min_tracking_confidence: float = config.HAND_MIN_TRACKING,
         coast_ms: float = config.HAND_COAST_MS,
-        infer_max_width: int = config.HAND_INFER_MAX_WIDTH,
-        tip_smoothing: float = config.HAND_TIP_SMOOTHING,
-        max_tip_jump: float = config.HAND_MAX_TIP_JUMP,
         max_coast_speed: float = config.HAND_MAX_COAST_SPEED,
-        pointer_lock_frames: int = config.HAND_POINTER_LOCK_FRAMES,
-        pointer_switch_margin: float = config.HAND_POINTER_SWITCH_MARGIN,
-        index_bias: float = config.HAND_INDEX_BIAS,
+        infer_max_width: int = config.HAND_INFER_MAX_WIDTH,
+        pointer_switch_frames: int = config.HAND_POINTER_SWITCH_FRAMES,
     ) -> None:
         path = Path(model_path) if model_path else _DEFAULT_MODEL
         if not path.is_file():
@@ -181,162 +110,201 @@ class HandTracker:
         self._landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
             options
         )
+        # Second detector for re-acquiring the hand from a crop around its last
+        # position. Runs only while the main tracker has lost the hand.
+        roi_options = mp.tasks.vision.HandLandmarkerOptions(
+            base_options=mp.tasks.BaseOptions(
+                model_asset_path=str(path),
+                delegate=mp.tasks.BaseOptions.Delegate.CPU,
+            ),
+            running_mode=mp.tasks.vision.RunningMode.IMAGE,
+            num_hands=1,
+            min_hand_detection_confidence=min_detection_confidence,
+            min_hand_presence_confidence=config.HAND_ROI_MIN_PRESENCE,
+            min_tracking_confidence=min_tracking_confidence,
+        )
+        self._roi_landmarker = mp.tasks.vision.HandLandmarker.create_from_options(
+            roi_options
+        )
         self._start = time.perf_counter()
         self._last_timestamp_ms = -1
         self._coast_s = coast_ms / 1000.0
-        self._infer_max_width = infer_max_width
-        self._tip_smoothing = tip_smoothing
-        self._max_tip_jump = max_tip_jump
+        self._search_s = config.HAND_SEARCH_MS / 1000.0
         self._max_coast_speed = max_coast_speed
-        self._pointer_lock_frames = pointer_lock_frames
-        self._pointer_switch_margin = pointer_switch_margin
-        self._index_bias = index_bias
+        self._infer_max_width = infer_max_width
+        self._pointer_switch_frames = pointer_switch_frames
 
+        self._filter = OneEuroFilter()
+        self._anchor = AnchoredTip()
         self._last_tip: tuple[float, float] | None = None
-        self._smooth_tip: tuple[float, float] | None = None
+        self._prev_tip: tuple[float, float] | None = None
+        self._prev_seen = 0.0
         self._last_landmarks: list[tuple[float, float, float]] = []
         self._last_confidence = 0.0
         self._last_seen = 0.0
-        self._velocity = (0.0, 0.0)
         self._pointer_finger = "index"
-        self._pointer_candidate = "index"
-        self._pointer_candidate_frames = 0
-        self._last_pointer_finger: str | None = "index"
+        self._switch_candidate: str | None = None
+        self._switch_frames = 0
 
     def _choose_pointer_finger(
         self,
         landmarks: list[tuple[float, float, float]],
     ) -> str:
-        scores: dict[str, float] = {}
-        extended: dict[str, bool] = {}
-        for name, (tip_i, pip_i, dip_i, mcp_i) in _FINGER_CHAINS.items():
-            scores[name] = _extension_score(landmarks, tip_i, pip_i, mcp_i)
-            extended[name] = _is_finger_extended(
-                landmarks, tip_i, pip_i, dip_i, mcp_i
-            )
+        """Pick the finger that clearly reaches farthest; default to index.
 
-        others_extended = [
-            name
-            for name in ("middle", "ring", "pinky")
-            if extended[name]
-        ]
+        MediaPipe occasionally swaps finger labels, so we trust geometry over
+        the label: the pointing finger is the one whose tip is far from the
+        wrist while the rest stay near the palm. If nothing is clearly
+        dominant we keep whatever we had (index at rest) so the marker never
+        hops onto a curled finger.
+        """
+        reach = {
+            name: _reach(landmarks, chain[0])
+            for name, chain in _FINGER_CHAINS.items()
+        }
+        current = self._pointer_finger
+        best = max(reach, key=reach.get)
+        others = [v for k, v in reach.items() if k != best]
+        runner_up = max(others) if others else 0.0
 
-        # Classic pointer: index out, others curled → always index.
-        if extended["index"] and not others_extended:
-            self._pointer_finger = "index"
-            self._pointer_candidate = "index"
-            self._pointer_candidate_frames = 0
-            return "index"
+        dominant = reach[best] >= runner_up * config.HAND_POINTER_DOMINANCE
+        if not dominant:
+            self._switch_candidate = None
+            self._switch_frames = 0
+            return current
 
-        # Index still out and competing fingers are weak → stay on index.
-        if extended["index"]:
-            best_other = max(
-                (scores[name] for name in ("middle", "ring", "pinky")),
-                default=float("-inf"),
-            )
-            if scores["index"] + self._index_bias >= best_other:
-                self._pointer_finger = "index"
-                self._pointer_candidate = "index"
-                self._pointer_candidate_frames = 0
-                return "index"
+        if best == current:
+            self._switch_candidate = None
+            self._switch_frames = 0
+            return current
 
-        # Nothing clearly extended → keep using index tip (game default).
-        candidates = [name for name, is_out in extended.items() if is_out]
-        if not candidates:
-            self._pointer_finger = "index"
-            self._pointer_candidate = "index"
-            self._pointer_candidate_frames = 0
-            return "index"
-
-        desired = max(candidates, key=lambda name: scores[name])
-        # Prefer index among extended candidates when close.
-        if "index" in candidates and scores["index"] + self._index_bias >= scores[desired]:
-            desired = "index"
-
-        locked = self._pointer_finger
-        # Drop a lock immediately if that finger curled back in.
-        if locked not in candidates:
-            self._pointer_finger = desired
-            self._pointer_candidate = desired
-            self._pointer_candidate_frames = 0
-            return desired
-
-        if desired == locked:
-            self._pointer_candidate = locked
-            self._pointer_candidate_frames = 0
-            return locked
-
-        margin = abs(scores[desired]) * self._pointer_switch_margin + 15.0
-        if scores[desired] < scores[locked] + margin:
-            self._pointer_candidate = locked
-            self._pointer_candidate_frames = 0
-            return locked
-
-        if desired == self._pointer_candidate:
-            self._pointer_candidate_frames += 1
+        # Snapping back to index is cheap; leaving it needs sustained evidence.
+        needed = 1 if best == "index" else self._pointer_switch_frames
+        if best == self._switch_candidate:
+            self._switch_frames += 1
         else:
-            self._pointer_candidate = desired
-            self._pointer_candidate_frames = 1
+            self._switch_candidate = best
+            self._switch_frames = 1
 
-        if self._pointer_candidate_frames >= self._pointer_lock_frames:
-            self._pointer_finger = desired
-            self._pointer_candidate_frames = 0
-
+        if self._switch_frames >= needed:
+            self._pointer_finger = best
+            self._switch_candidate = None
+            self._switch_frames = 0
         return self._pointer_finger
 
-    def _pointer_tip(
+    def _coast_velocity(self) -> tuple[float, float]:
+        if self._prev_tip is None or self._last_tip is None:
+            return 0.0, 0.0
+        dt = self._last_seen - self._prev_seen
+        if dt <= 1e-4:
+            return 0.0, 0.0
+        vx = (self._last_tip[0] - self._prev_tip[0]) / dt
+        vy = (self._last_tip[1] - self._prev_tip[1]) / dt
+        speed = math.hypot(vx, vy)
+        if speed > self._max_coast_speed:
+            scale = self._max_coast_speed / speed
+            vx *= scale
+            vy *= scale
+        return vx, vy
+
+    def _reset_state(self) -> None:
+        self._filter.reset()
+        self._anchor.reset()
+        self._last_tip = None
+        self._prev_tip = None
+        self._prev_seen = 0.0
+        self._last_landmarks = []
+        self._last_confidence = 0.0
+        self._pointer_finger = "index"
+        self._switch_candidate = None
+        self._switch_frames = 0
+
+    def _search_roi(self, width: int, height: int) -> tuple[int, int, int, int] | None:
+        """Crop window around the last known hand, grown to allow for motion."""
+        if not self._last_landmarks:
+            return None
+        xs = [p[0] for p in self._last_landmarks]
+        ys = [p[1] for p in self._last_landmarks]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        if self._last_tip is not None:
+            # Bias toward where the coasting tip has moved.
+            vx, vy = self._coast_velocity()
+            dt = min(time.perf_counter() - self._last_seen, self._search_s)
+            cx += vx * dt * 0.5
+            cy += vy * dt * 0.5
+        size = max(max(xs) - min(xs), max(ys) - min(ys))
+        half = max(size * config.HAND_SEARCH_SCALE, config.HAND_SEARCH_MIN_PX) / 2.0
+        x0 = int(max(cx - half, 0))
+        y0 = int(max(cy - half, 0))
+        x1 = int(min(cx + half, width))
+        y1 = int(min(cy + half, height))
+        if x1 - x0 < 32 or y1 - y0 < 32:
+            return None
+        return x0, y0, x1, y1
+
+    def _detect_in_roi(
+        self,
+        frame_bgr: np.ndarray,
+    ) -> tuple[list[tuple[float, float, float]], float] | None:
+        height, width = frame_bgr.shape[:2]
+        roi = self._search_roi(width, height)
+        if roi is None:
+            return None
+        x0, y0, x1, y1 = roi
+        crop = frame_bgr[y0:y1, x0:x1]
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        result = self._roi_landmarker.detect(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+        )
+        if not result.hand_landmarks:
+            return None
+        cw, ch = x1 - x0, y1 - y0
+        landmarks = [
+            (x0 + lm.x * cw, y0 + lm.y * ch, lm.z) for lm in result.hand_landmarks[0]
+        ]
+        confidence = 0.0
+        if result.handedness and result.handedness[0]:
+            confidence = float(result.handedness[0][0].score)
+        return landmarks, confidence
+
+    def _accept(
         self,
         landmarks: list[tuple[float, float, float]],
-    ) -> tuple[float, float]:
-        finger = self._choose_pointer_finger(landmarks)
-        tip_i, pip_i, dip_i, mcp_i = _FINGER_CHAINS[finger]
-        return _stabilize_finger_tip(landmarks, tip_i, pip_i, dip_i, mcp_i)
-
-    def _refine_tip(
-        self,
-        tip: tuple[float, float],
+        confidence: float,
         now: float,
-    ) -> tuple[float, float]:
-        if self._smooth_tip is None:
-            self._smooth_tip = tip
-            return tip
-
-        dx = tip[0] - self._smooth_tip[0]
-        dy = tip[1] - self._smooth_tip[1]
-        dist = math.hypot(dx, dy)
-        if dist > self._max_tip_jump and dist > 1e-6:
-            scale = self._max_tip_jump / dist
-            tip = (
-                self._smooth_tip[0] + dx * scale,
-                self._smooth_tip[1] + dy * scale,
-            )
-
-        alpha = self._tip_smoothing
-        # Stronger smoothing on small jitters; stay snappier on real swipes.
-        if dist < 25.0:
-            alpha = min(alpha, 0.28)
-        elif dist > 70.0:
-            alpha = max(alpha, 0.55)
-
-        smoothed = (
-            alpha * tip[0] + (1.0 - alpha) * self._smooth_tip[0],
-            alpha * tip[1] + (1.0 - alpha) * self._smooth_tip[1],
+    ) -> HandResult:
+        previous_finger = self._pointer_finger
+        finger = self._choose_pointer_finger(landmarks)
+        if finger != previous_finger:
+            # A relabel means the physical tip barely moved, but the raw
+            # coordinate jumps; restart the filters so they don't smear.
+            self._filter.reset()
+            self._anchor.reset()
+        tip_i = _FINGER_CHAINS[finger][0]
+        raw = (landmarks[tip_i][0], landmarks[tip_i][1])
+        dt = now - self._last_seen if self._last_tip is not None else 0.0
+        stable = self._anchor.update(
+            _palm_center(landmarks), raw, self._filter.speed, dt
         )
-        self._smooth_tip = smoothed
+        tip = self._filter.update(stable[0], stable[1], now)
 
-        if self._last_tip is not None and self._last_seen > 0:
-            dt = now - self._last_seen
-            if dt > 1e-4:
-                vx = (smoothed[0] - self._last_tip[0]) / dt
-                vy = (smoothed[1] - self._last_tip[1]) / dt
-                speed = math.hypot(vx, vy)
-                if speed > self._max_coast_speed:
-                    scale = self._max_coast_speed / speed
-                    vx *= scale
-                    vy *= scale
-                self._velocity = (vx, vy)
+        self._prev_tip = self._last_tip
+        self._prev_seen = self._last_seen
+        self._last_tip = tip
+        self._last_landmarks = landmarks
+        self._last_confidence = confidence
+        self._last_seen = now
 
-        return smoothed
+        return {
+            "detected": True,
+            "index_tip": tip,
+            "raw_tip": raw,
+            "confidence": confidence,
+            "landmarks": landmarks,
+            "coasted": False,
+            "pointer_finger": finger,
+        }
 
     def process(self, frame_bgr: np.ndarray) -> HandResult:
         """Run detection on a BGR frame. Tip coords are in pixel space."""
@@ -363,67 +331,49 @@ class HandTracker:
 
         if result.hand_landmarks:
             hand = result.hand_landmarks[0]
-            landmarks = [
-                (lm.x * width, lm.y * height, lm.z) for lm in hand
-            ]
-            tip = self._pointer_tip(landmarks)
-            tip = self._refine_tip(tip, now)
-
+            landmarks = [(lm.x * width, lm.y * height, lm.z) for lm in hand]
             confidence = 0.0
-            if result.handedness:
-                categories = result.handedness[0]
-                if categories:
-                    confidence = float(categories[0].score)
+            if result.handedness and result.handedness[0]:
+                confidence = float(result.handedness[0][0].score)
+            return self._accept(landmarks, confidence, now)
 
-            self._last_tip = tip
-            self._last_landmarks = landmarks
-            self._last_confidence = confidence
-            self._last_seen = now
-            self._last_pointer_finger = self._pointer_finger
+        # Full-frame detection tends to fail when the hand overlaps the face
+        # or hair. Look again in a crop around where the hand just was, where
+        # it fills the image and the background is mostly excluded.
+        if self._last_landmarks and (now - self._last_seen) <= self._search_s:
+            found = self._detect_in_roi(frame_bgr)
+            if found is not None:
+                landmarks, confidence = found
+                return self._accept(landmarks, confidence, now)
 
-            return {
-                "detected": True,
-                "index_tip": tip,
-                "confidence": confidence,
-                "landmarks": landmarks,
-                "coasted": False,
-                "pointer_finger": self._pointer_finger,
-            }
-
-        if (
-            self._last_tip is not None
-            and (now - self._last_seen) <= self._coast_s
-        ):
+        if self._last_tip is not None and (now - self._last_seen) <= self._coast_s:
+            vx, vy = self._coast_velocity()
             dt = now - self._last_seen
+            # Decay the velocity so a drop right at a direction change doesn't
+            # fling the cursor far past where the hand actually reversed.
+            tau = config.HAND_COAST_DECAY_MS / 1000.0
+            travel = tau * (1.0 - math.exp(-dt / tau))
             tip = (
-                self._last_tip[0] + self._velocity[0] * dt,
-                self._last_tip[1] + self._velocity[1] * dt,
+                float(np.clip(self._last_tip[0] + vx * travel, 0, width - 1)),
+                float(np.clip(self._last_tip[1] + vy * travel, 0, height - 1)),
             )
-            tip = (
-                float(np.clip(tip[0], 0, width - 1)),
-                float(np.clip(tip[1], 0, height - 1)),
-            )
-            self._smooth_tip = tip
+            self._filter.advance(tip[0], tip[1], now)
             return {
                 "detected": True,
                 "index_tip": tip,
+                "raw_tip": None,
                 "confidence": self._last_confidence,
                 "landmarks": self._last_landmarks,
                 "coasted": True,
-                "pointer_finger": self._last_pointer_finger,
+                "pointer_finger": self._pointer_finger,
             }
 
-        self._last_tip = None
-        self._smooth_tip = None
-        self._last_landmarks = []
-        self._velocity = (0.0, 0.0)
-        self._pointer_finger = "index"
-        self._pointer_candidate = "index"
-        self._pointer_candidate_frames = 0
-        self._last_pointer_finger = None
+        if (now - self._last_seen) > max(self._coast_s, self._search_s):
+            self._reset_state()
         return {
             "detected": False,
             "index_tip": None,
+            "raw_tip": None,
             "confidence": 0.0,
             "landmarks": [],
             "coasted": False,
@@ -432,6 +382,7 @@ class HandTracker:
 
     def close(self) -> None:
         self._landmarker.close()
+        self._roi_landmarker.close()
 
     def __enter__(self) -> HandTracker:
         return self
@@ -448,15 +399,12 @@ def draw_hand_overlay(frame_bgr: np.ndarray, hand: HandResult) -> None:
     height, width = frame_bgr.shape[:2]
 
     if hand["landmarks"] and not hand["coasted"]:
-        normalized = []
-        for x, y, z in hand["landmarks"]:
-            normalized.append(
-                mp.tasks.components.containers.NormalizedLandmark(
-                    x=x / width,
-                    y=y / height,
-                    z=z,
-                )
+        normalized = [
+            mp.tasks.components.containers.NormalizedLandmark(
+                x=x / width, y=y / height, z=z
             )
+            for x, y, z in hand["landmarks"]
+        ]
         draw_landmarks(
             frame_bgr,
             normalized,

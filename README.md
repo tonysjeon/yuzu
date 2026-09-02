@@ -23,9 +23,10 @@ Use `python3.11` instead if that is what you have installed.
 python main.py
 ```
 
-Opens a `yuzu` game window and draws your index fingertip as a circle.
-Hand motion is mapped through an active camera region so small movements can
-cover the full screen. Uses the Mac's built-in camera (Continuity Camera /
-iPhone is skipped). The window is resizable. Press `q` or `Esc` to quit.
+Opens a `yuzu` game window and draws your index fingertip as a circle. A white
+blade trail appears only when you swipe fast enough (idle tips stay dim). Hand
+motion is mapped through an active camera region so small movements can cover
+the full screen. Uses the Mac's built-in camera (Continuity Camera / iPhone is
+skipped). The window is resizable. Press `q` or `Esc` to quit.
 
 If the camera fails to open on macOS, enable **Camera** access for Terminal (or Cursor) under **System Settings → Privacy & Security → Camera**, then rerun.

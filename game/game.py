@@ -8,7 +8,7 @@ from src import config
 
 
 class Game:
-    """Minimal play surface: show the fingertip as a circle."""
+    """Play surface with fingertip marker and blade trail."""
 
     def __init__(
         self,
@@ -23,6 +23,9 @@ class Game:
         self.running = True
         self.fingertip: tuple[float, float] | None = None
         self.pointer_finger: str | None = None
+        self.blade_points: list[tuple[float, float]] = []
+        self.blade_active = False
+        self.swipe_velocity = 0.0
         self._font = pygame.font.SysFont("helvetica", 22)
         self._set_mode(width, height)
 
@@ -56,8 +59,18 @@ class Game:
         self.fingertip = point
         self.pointer_finger = pointer_finger if point is not None else None
 
+    def set_blade_points(
+        self,
+        points: list[tuple[float, float]],
+        active: bool = False,
+        velocity: float = 0.0,
+    ) -> None:
+        self.blade_points = points
+        self.blade_active = active
+        self.swipe_velocity = velocity
+
     def update(self) -> None:
-        """Placeholder for fruit / blade updates in later milestones."""
+        """Placeholder for fruit / collision updates in later milestones."""
 
     def render(self) -> None:
         self.screen.fill((18, 18, 22))
@@ -81,16 +94,34 @@ class Game:
                 1,
             )
 
+        if self.blade_active and len(self.blade_points) >= 2:
+            pts = [(int(x), int(y)) for x, y in self.blade_points]
+            pygame.draw.lines(
+                self.screen,
+                (255, 255, 255),
+                False,
+                pts,
+                config.BLADE_THICKNESS,
+            )
+            # Round joints so the thick polyline doesn't show seams at bends.
+            radius = max(config.BLADE_THICKNESS // 2, 1)
+            for p in pts:
+                pygame.draw.circle(self.screen, (255, 255, 255), p, radius)
+
         if self.fingertip is not None:
             x, y = int(self.fingertip[0]), int(self.fingertip[1])
-            pygame.draw.circle(self.screen, (255, 220, 40), (x, y), 14)
+            tip_color = (255, 220, 40) if self.blade_active else (120, 120, 130)
+            pygame.draw.circle(self.screen, tip_color, (x, y), 14)
             pygame.draw.circle(self.screen, (255, 255, 255), (x, y), 4)
 
         if self.fingertip is None:
             text = "no hand"
         else:
             finger = self.pointer_finger or "tip"
-            text = f"{finger} tip"
+            state = "swipe" if self.blade_active else "idle"
+            text = f"{finger} tip · {state}"
+            if config.DEBUG:
+                text += f" · {self.swipe_velocity:.0f} px/s"
         label = self._font.render(text, True, (200, 200, 200))
         self.screen.blit(label, (16, 14))
         pygame.display.flip()
