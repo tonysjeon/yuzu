@@ -5,23 +5,10 @@ from __future__ import annotations
 import sys
 
 from game.game import Game
+from src import config
 from src.camera import Camera
+from src.coordinate_mapper import CoordinateMapper
 from src.hand_tracker import HandTracker
-
-
-def _map_to_game(
-    tip: tuple[float, float],
-    camera_width: int,
-    camera_height: int,
-    game_width: int,
-    game_height: int,
-) -> tuple[float, float]:
-    """Simple scale from camera pixels into the game surface."""
-    x = tip[0] / max(camera_width, 1) * game_width
-    y = tip[1] / max(camera_height, 1) * game_height
-    x = min(max(x, 0.0), game_width - 1.0)
-    y = min(max(y, 0.0), game_height - 1.0)
-    return x, y
 
 
 def main() -> int:
@@ -39,9 +26,18 @@ def main() -> int:
         return 1
 
     game = Game()
+    mapper = CoordinateMapper(
+        camera_width=camera.width,
+        camera_height=camera.height,
+        game_width=game.width,
+        game_height=game.height,
+        active_region=config.ACTIVE_REGION,
+    )
+
     try:
         while game.running:
             game.handle_events()
+            mapper.set_game_size(game.width, game.height)
 
             frame = camera.read()
             if frame is None:
@@ -54,14 +50,9 @@ def main() -> int:
 
             hand = tracker.process(frame)
             if hand["detected"] and hand["index_tip"] is not None:
+                tip_x, tip_y = hand["index_tip"]
                 game.set_fingertip(
-                    _map_to_game(
-                        hand["index_tip"],
-                        camera.width,
-                        camera.height,
-                        game.width,
-                        game.height,
-                    ),
+                    mapper.map(tip_x, tip_y),
                     pointer_finger=hand.get("pointer_finger"),
                 )
             else:

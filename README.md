@@ -24,7 +24,8 @@ python main.py
 ```
 
 Opens a `yuzu` game window and draws your index fingertip as a circle.
-Uses the Mac's built-in camera (Continuity Camera / iPhone is skipped).
-The window is resizable. Press `q` or `Esc` to quit.
+Hand motion is mapped through an active camera region so small movements can
+cover the full screen. Uses the Mac's built-in camera (Continuity Camera /
+iPhone is skipped). The window is resizable. Press `q` or `Esc` to quit.
 
 If the camera fails to open on macOS, enable **Camera** access for Terminal (or Cursor) under **System Settings → Privacy & Security → Camera**, then rerun.

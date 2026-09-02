@@ -62,6 +62,25 @@ class Game:
     def render(self) -> None:
         self.screen.fill((18, 18, 22))
 
+        if config.DEBUG:
+            # Corner guides: active-region corners should reach these.
+            margin = 18
+            color = (60, 60, 70)
+            corners = [
+                (margin, margin),
+                (self.width - margin, margin),
+                (margin, self.height - margin),
+                (self.width - margin, self.height - margin),
+            ]
+            for cx, cy in corners:
+                pygame.draw.circle(self.screen, color, (cx, cy), 6, 1)
+            pygame.draw.rect(
+                self.screen,
+                color,
+                (margin, margin, self.width - 2 * margin, self.height - 2 * margin),
+                1,
+            )
+
         if self.fingertip is not None:
             x, y = int(self.fingertip[0]), int(self.fingertip[1])
             pygame.draw.circle(self.screen, (255, 220, 40), (x, y), 14)

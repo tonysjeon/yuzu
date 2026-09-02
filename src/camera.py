@@ -6,6 +6,7 @@ import json
 import platform
 import re
 import subprocess
+import sys
 import time
 
 import cv2
@@ -14,7 +15,7 @@ import numpy as np
 from src import config
 
 _SKIP_NAME_PATTERN = re.compile(
-    r"iphone|ipad|continuity|desk\s*view",
+    r"iphone|ipad|continuity|desk\s*view|apple\s*continuity",
     re.IGNORECASE,
 )
 _BUILTIN_NAME_PATTERN = re.compile(
@@ -49,26 +50,8 @@ def _camera_names_via_system_profiler() -> list[str]:
     return [str(cam.get("_name", "")).strip() for cam in cameras if cam.get("_name")]
 
 
-def _builtin_index_via_names(names: list[str]) -> int | None:
-    """Prefer FaceTime/MacBook cameras; skip Continuity / iPhone."""
-    if not names:
-        return None
-
-    for index, name in enumerate(names):
-        if _SKIP_NAME_PATTERN.search(name):
-            continue
-        if _BUILTIN_NAME_PATTERN.search(name):
-            return index
-
-    for index, name in enumerate(names):
-        if not _SKIP_NAME_PATTERN.search(name):
-            return index
-
-    return None
-
-
-def _builtin_index_via_swift() -> int | None:
-    """Return index of the built-in wide camera in an AVFoundation device list."""
+def _builtin_camera_name_via_swift() -> str | None:
+    """Return the localized name of the Mac built-in wide camera."""
     if platform.system() != "Darwin":
         return None
 
@@ -76,31 +59,17 @@ def _builtin_index_via_swift() -> int | None:
 import AVFoundation
 import Foundation
 
-let types: [AVCaptureDevice.DeviceType] = [
-    .builtInWideAngleCamera,
-    .continuityCamera,
-    .external,
-    .deskViewCamera
-]
 let devices = AVCaptureDevice.DiscoverySession(
-    deviceTypes: types,
+    deviceTypes: [.builtInWideAngleCamera],
     mediaType: .video,
     position: .unspecified
 ).devices
 
-guard let builtin = devices.first(where: {
-    $0.deviceType == .builtInWideAngleCamera
-}) else {
+guard let builtin = devices.first else {
     fputs("NO_BUILTIN\n", stderr)
     exit(2)
 }
-
-if let index = devices.firstIndex(where: { $0.uniqueID == builtin.uniqueID }) {
-    print(index)
-} else {
-    fputs("NO_INDEX\n", stderr)
-    exit(3)
-}
+print(builtin.localizedName)
 """
     try:
         result = subprocess.run(
@@ -116,28 +85,55 @@ if let index = devices.firstIndex(where: { $0.uniqueID == builtin.uniqueID }) {
 
     if result.returncode != 0:
         return None
-
-    line = result.stdout.strip().splitlines()
-    if not line:
-        return None
-    try:
-        return int(line[0].strip())
-    except ValueError:
-        return None
+    name = result.stdout.strip().splitlines()
+    return name[0].strip() if name else None
 
 
-def resolve_webcam_device_index(names: list[str] | None = None) -> int:
-    """Pick the built-in Mac webcam; never prefer Continuity Camera."""
+def _is_skipped_name(name: str) -> bool:
+    return bool(_SKIP_NAME_PATTERN.search(name))
+
+
+def _is_builtin_name(name: str) -> bool:
+    return bool(_BUILTIN_NAME_PATTERN.search(name))
+
+
+def resolve_webcam_candidates(names: list[str] | None = None) -> list[int]:
+    """Ordered OpenCV indexes to try, FaceTime/built-in first, Continuity never."""
     camera_names = names if names is not None else _camera_names_via_system_profiler()
-    by_name = _builtin_index_via_names(camera_names)
-    if by_name is not None:
-        return by_name
+    builtin_name = _builtin_camera_name_via_swift()
+    preferred: list[int] = []
 
-    by_swift = _builtin_index_via_swift()
-    if by_swift is not None:
-        return by_swift
+    def add(index: int) -> None:
+        if index not in preferred:
+            preferred.append(index)
 
-    return 0
+    # Match AVFoundation built-in name against system_profiler / OpenCV order.
+    if builtin_name and camera_names:
+        for index, name in enumerate(camera_names):
+            if _is_skipped_name(name):
+                continue
+            if (
+                name == builtin_name
+                or builtin_name.lower() in name.lower()
+                or name.lower() in builtin_name.lower()
+            ):
+                add(index)
+
+    if camera_names:
+        for index, name in enumerate(camera_names):
+            if _is_skipped_name(name):
+                continue
+            if _is_builtin_name(name):
+                add(index)
+        for index, name in enumerate(camera_names):
+            if not _is_skipped_name(name):
+                add(index)
+        return preferred
+
+    # No names (permissions / timing). Continuity is usually 0 — try 1 first.
+    for index in (1, 0, 2, 3, 4):
+        add(index)
+    return preferred
 
 
 def _open_capture(device_index: int) -> cv2.VideoCapture | None:
@@ -150,12 +146,6 @@ def _open_capture(device_index: int) -> cv2.VideoCapture | None:
     return None
 
 
-def _is_skipped_camera(index: int, names: list[str]) -> bool:
-    if index >= len(names):
-        return False
-    return bool(_SKIP_NAME_PATTERN.search(names[index]))
-
-
 class Camera:
     """Open the built-in Mac webcam and return mirrored frames."""
 
@@ -165,17 +155,13 @@ class Camera:
         height: int = config.CAMERA_HEIGHT,
     ) -> None:
         names = _camera_names_via_system_profiler()
-        preferred = resolve_webcam_device_index(names)
-        self.device_index = preferred
+        candidates = resolve_webcam_candidates(names)
+        self.device_index = -1
+        self.device_name = "unknown"
         self._cap: cv2.VideoCapture | None = None
 
-        candidates: list[int] = [preferred]
-        for index in range(0, max(5, len(names))):
-            if index not in candidates:
-                candidates.append(index)
-
         for index in candidates:
-            if _is_skipped_camera(index, names):
+            if index < len(names) and _is_skipped_name(names[index]):
                 continue
 
             cap = _open_capture(index)
@@ -188,18 +174,31 @@ class Camera:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             if self._grab_first_frame(cap) is not None:
+                # Final guard: never keep a Continuity / iPhone device by name.
+                label = names[index] if index < len(names) else f"index {index}"
+                if _is_skipped_name(label):
+                    cap.release()
+                    continue
+
                 self._cap = cap
                 self.device_index = index
+                self.device_name = label
                 break
 
             cap.release()
 
         if self._cap is None:
             raise RuntimeError(
-                "Unable to open the Mac webcam. Continuity Camera (iPhone) "
-                "is ignored on purpose. Grant Camera access under System "
-                "Settings → Privacy & Security → Camera, then try again."
+                "Unable to open the Mac FaceTime webcam. Continuity Camera "
+                "(iPhone) is ignored on purpose. Grant Camera access under "
+                "System Settings → Privacy & Security → Camera, put the "
+                "iPhone away/lock Continuity Camera if needed, then try again."
             )
+
+        print(
+            f"Using camera {self.device_index}: {self.device_name}",
+            file=sys.stderr,
+        )
 
         actual_width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
