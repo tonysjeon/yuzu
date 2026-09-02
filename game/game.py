@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pygame
 
+from game.fruit_manager import FruitManager
 from src import config
 
 
 class Game:
-    """Play surface with fingertip marker and blade trail."""
+    """Play surface with fruits, fingertip marker, and blade trail."""
 
     def __init__(
         self,
@@ -26,6 +27,7 @@ class Game:
         self.blade_points: list[tuple[float, float]] = []
         self.blade_active = False
         self.swipe_velocity = 0.0
+        self.fruits = FruitManager()
         self._font = pygame.font.SysFont("helvetica", 22)
         self._set_mode(width, height)
 
@@ -70,7 +72,10 @@ class Game:
         self.swipe_velocity = velocity
 
     def update(self) -> None:
-        """Placeholder for fruit / collision updates in later milestones."""
+        # get_time is ms since the previous tick(); first frame may be 0.
+        dt_ms = self.clock.get_time()
+        dt = (1.0 / self.target_fps) if dt_ms <= 0 else dt_ms / 1000.0
+        self.fruits.update(dt, self.width, self.height)
 
     def render(self) -> None:
         self.screen.fill((18, 18, 22))
@@ -93,6 +98,9 @@ class Game:
                 (margin, margin, self.width - 2 * margin, self.height - 2 * margin),
                 1,
             )
+
+        for fruit in self.fruits.active_fruits:
+            fruit.draw(self.screen)
 
         if self.blade_active and len(self.blade_points) >= 2:
             pts = [(int(x), int(y)) for x, y in self.blade_points]

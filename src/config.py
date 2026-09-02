@@ -77,6 +77,13 @@ BLADE_CURVE_SEGMENTS = 8
 
 FRUIT_MIN_SPAWN_INTERVAL = 1.0
 FRUIT_MAX_SPAWN_INTERVAL = 2.0
+# Peak height as a fraction of the window, measured from the top.
+FRUIT_PEAK_MIN = 0.16
+FRUIT_PEAK_MAX = 0.40
+# Keep the whole sprite inside this many pixels of the left/right edges.
+FRUIT_SIDE_PAD = 28.0
+# Spawn a bit below the bottom edge so fruits rise into view.
+FRUIT_SPAWN_MARGIN_Y = 40.0
 
 GRAVITY = 1100
 
