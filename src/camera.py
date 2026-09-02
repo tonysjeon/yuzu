@@ -184,6 +184,8 @@ class Camera:
 
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            # Drop stale buffered frames so the tip tracks the live hand.
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             if self._grab_first_frame(cap) is not None:
                 self._cap = cap
