@@ -45,6 +45,7 @@ class HandResult(TypedDict):
     coasted: bool
     pointer_finger: str | None
     palm: bool
+    fist: bool
 
 
 def _xy(landmarks: list[tuple[float, float, float]], index: int) -> np.ndarray:
@@ -90,6 +91,16 @@ def is_open_palm(landmarks: list[tuple[float, float, float]]) -> bool:
     if shortest <= 0.0:
         return False
     return max(reaches) <= shortest * config.HAND_PALM_EVENNESS
+
+
+def is_fist(landmarks: list[tuple[float, float, float]]) -> bool:
+    """True when every non-thumb finger is curled in, not a point or palm."""
+    if len(landmarks) < 21:
+        return False
+    reaches = [_reach(landmarks, chain[0]) for chain in _FINGER_CHAINS.values()]
+    if any(r <= 0.0 for r in reaches):
+        return False
+    return all(r < config.HAND_FIST_MAX_REACH for r in reaches)
 
 
 class HandTracker:
@@ -323,6 +334,7 @@ class HandTracker:
             "coasted": False,
             "pointer_finger": finger,
             "palm": is_open_palm(landmarks),
+            "fist": is_fist(landmarks),
         }
 
     def process(self, frame_bgr: np.ndarray) -> HandResult:
@@ -386,6 +398,7 @@ class HandTracker:
                 "coasted": True,
                 "pointer_finger": self._pointer_finger,
                 "palm": False,
+                "fist": False,
             }
 
         if (now - self._last_seen) > max(self._coast_s, self._search_s):
@@ -399,6 +412,7 @@ class HandTracker:
             "coasted": False,
             "pointer_finger": None,
             "palm": False,
+            "fist": False,
         }
 
     def close(self) -> None:

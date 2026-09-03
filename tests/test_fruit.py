@@ -10,6 +10,7 @@ import numpy as np
 
 from game.fruit import Fruit, _flesh_albedo
 from game.fruit_manager import FruitManager
+from src import config
 
 
 class FruitPhysicsTests(unittest.TestCase):
@@ -67,7 +68,7 @@ class FruitManagerTests(unittest.TestCase):
         fruit = self.manager.spawn(width=800, height=600)
         self.assertGreater(fruit.y, 600)
         self.assertLess(fruit.velocity_y, 0)
-        self.assertIn(fruit.fruit_type, ("yuzu", "orange", "watermelon"))
+        self.assertIn(fruit.fruit_type, ("yuzu", "orange", "watermelon", "bomb"))
 
     def test_fruit_follows_arc_then_is_culled(self) -> None:
         fruit = self.manager.spawn(width=800, height=600)
@@ -120,7 +121,7 @@ class FruitManagerTests(unittest.TestCase):
         from pathlib import Path
 
         folder = Path(__file__).resolve().parents[1] / "assets" / "fruits"
-        for kind in ("yuzu", "orange", "watermelon"):
+        for kind in ("yuzu", "orange", "watermelon", "bomb"):
             self.assertTrue((folder / f"{kind}.png").is_file(), kind)
 
     def test_hud_fonts_exist(self) -> None:
@@ -147,6 +148,30 @@ class FruitManagerTests(unittest.TestCase):
         misses = self.manager.update(1 / 60, width=800, height=600)
         self.assertEqual(misses, 1)
         self.assertEqual(self.manager.fruits, [])
+
+    def test_falling_bomb_is_not_a_miss(self) -> None:
+        bomb = Fruit(
+            x=100,
+            y=700,
+            velocity_x=0,
+            velocity_y=200,
+            radius=20,
+            sliced=False,
+            active=True,
+            fruit_type="bomb",
+            color=(40, 42, 48),
+        )
+        self.manager.fruits = [bomb]
+        self.manager._time_to_spawn = 10.0
+        misses = self.manager.update(1 / 60, width=800, height=600)
+        self.assertEqual(misses, 0)
+        self.assertEqual(self.manager.fruits, [])
+
+    def test_can_spawn_a_bomb(self) -> None:
+        bomb = self.manager.spawn(width=800, height=600, kind="bomb")
+        self.assertTrue(bomb.is_bomb)
+        self.assertEqual(bomb.fruit_type, "bomb")
+        self.assertAlmostEqual(bomb.radius, config.BOMB_RADIUS)
 
     def test_rising_fruit_below_screen_is_not_a_miss(self) -> None:
         fruit = Fruit(

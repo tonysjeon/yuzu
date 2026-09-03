@@ -83,5 +83,28 @@ class SliceWithBladeTests(unittest.TestCase):
         self.assertEqual(len(manager.active_fruits), 1)
 
 
+class SliceBombTests(unittest.TestCase):
+    def test_sliced_bomb_does_not_split_or_score(self) -> None:
+        manager = FruitManager(min_interval=10, max_interval=10)
+        bomb = Fruit(
+            x=100,
+            y=100,
+            velocity_x=0,
+            velocity_y=0,
+            radius=20,
+            sliced=False,
+            active=True,
+            fruit_type="bomb",
+            color=(40, 42, 48),
+        )
+        manager.fruits = [bomb]
+        n = manager.slice_with_blade([(0.0, 100.0), (200.0, 100.0)])
+        self.assertEqual(n, 0)
+        self.assertTrue(manager.hit_bomb)
+        self.assertTrue(bomb.sliced)
+        self.assertEqual(manager.pieces, [])
+        self.assertEqual(manager.active_fruits, [])
+
+
 if __name__ == "__main__":
     unittest.main()

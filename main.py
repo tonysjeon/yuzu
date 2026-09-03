@@ -58,7 +58,7 @@ def main() -> int:
             hand = tracker.process(frame)
             live = bool(hand["detected"] and not hand.get("coasted"))
             if live:
-                game.set_palm(bool(hand.get("palm")))
+                game.set_palm(bool(hand.get("palm")), fist=bool(hand.get("fist")))
             else:
                 # Lost or coasting: keep pause as-is instead of auto-resuming.
                 game.set_palm(None)

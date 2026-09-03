@@ -8,8 +8,10 @@ import unittest
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
+import pygame
+
 from game.fruit import Fruit
-from game.game import Game, combo_multiplier, combo_name, format_clock
+from game.game import Game, combo_colors, combo_heat, combo_multiplier, combo_name, format_clock
 from src import config
 
 
@@ -35,9 +37,100 @@ class ClockFormatTests(unittest.TestCase):
         self.assertEqual(format_clock(-1), "0:00")
 
 
+class TitleScreenTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.game = Game(width=400, height=300)
+        self.game.fruits._time_to_spawn = 0.0
+
+    def tearDown(self) -> None:
+        self.game.quit()
+
+    def test_starts_on_the_title_screen(self) -> None:
+        self.assertTrue(self.game.on_title)
+        self.assertFalse(self.game.game_over)
+        self.assertEqual(len(self.game.fruits.fruits), 1)
+        fruit = self.game.fruits.fruits[0]
+        self.assertEqual(fruit.fruit_type, "yuzu")
+        self.assertGreater(fruit.y, self.game.height * 0.35)
+        self.assertLess(fruit.y, self.game.height * 0.85)
+        before = fruit.rotation
+        self.game.update()
+        self.assertEqual(fruit.rotation, before)
+
+    def test_title_does_not_tick_the_timer_or_spawn(self) -> None:
+        before = self.game.time_left
+        self.game.update()
+        self.assertTrue(self.game.on_title)
+        self.assertAlmostEqual(self.game.time_left, before)
+        self.assertEqual(len(self.game.fruits.fruits), 1)
+
+    def test_restart_leaves_the_title_screen(self) -> None:
+        self.game.restart()
+        self.assertFalse(self.game.on_title)
+        self.assertAlmostEqual(self.game.time_left, float(config.ROUND_SECONDS))
+
+    def test_slicing_the_title_yuzu_starts_the_round(self) -> None:
+        fruit = self.game.fruits.fruits[0]
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, fruit.y), (400.0, fruit.y)]
+        self.game.update()
+        self.assertTrue(fruit.sliced)
+        self.assertTrue(self.game.on_title)
+        before = self.game.time_left
+        self.game._title_start_in = 0.0
+        self.game.update()
+        self.assertTrue(self.game.on_title)
+        self.assertTrue(self.game._title_sliding)
+        self.assertAlmostEqual(self.game.time_left, before)
+        self.game._title_slide = 0.5
+        self.game.update()
+        self.assertTrue(self.game.on_title)
+        self.assertAlmostEqual(self.game.time_left, before)
+        self.game._title_slide = 1.0
+        self.game.update()
+        self.assertFalse(self.game.on_title)
+        self.assertAlmostEqual(self.game.time_left, float(config.ROUND_SECONDS))
+        self.game.update()
+        self.assertAlmostEqual(self.game.time_left, float(config.ROUND_SECONDS))
+        self.assertGreater(self.game._timer_hold, 0.0)
+        self.game._timer_hold = 0.0
+        self.game.update()
+        self.assertLess(self.game.time_left, float(config.ROUND_SECONDS))
+
+    def test_first_toss_arrives_before_the_timer_starts(self) -> None:
+        self.game.restart(from_title=True)
+        before = self.game.time_left
+        dt = 1.0 / self.game.target_fps
+        frames = int(config.TITLE_FIRST_SPAWN / dt) + 3
+        for _ in range(frames):
+            self.game.update()
+        self.assertTrue(any(not f.is_bomb for f in self.game.fruits.fruits) or len(self.game.fruits.fruits) >= 1)
+        self.assertAlmostEqual(self.game.time_left, before)
+        self.assertGreater(self.game._timer_hold, 0.0)
+
+    def test_title_slide_drops_the_overlay(self) -> None:
+        self.assertEqual(self.game._title_slide_offset(), 0)
+        self.game._title_slide = 1.0
+        self.assertEqual(self.game._title_slide_offset(), self.game.height)
+
+    def test_slash_missing_the_yuzu_stays_on_title(self) -> None:
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, 20.0), (400.0, 20.0)]
+        self.game.update()
+        self.assertTrue(self.game.on_title)
+        self.assertFalse(self.game.fruits.fruits[0].sliced)
+
+    def test_palm_does_not_pause_on_title(self) -> None:
+        for _ in range(config.PALM_PAUSE_FRAMES):
+            self.game.set_palm(True)
+        self.assertFalse(self.game.paused)
+        self.assertTrue(self.game.on_title)
+
+
 class TimerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.game = Game(width=400, height=300)
+        self.game.restart()
         self.game.fruits._time_to_spawn = 10.0
 
     def tearDown(self) -> None:
@@ -139,9 +232,108 @@ class TimerTests(unittest.TestCase):
         self.assertTrue(fruit.sliced)
 
 
+class BombTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.game = Game(width=400, height=300)
+        self.game.restart()
+        self.game.fruits._time_to_spawn = 10.0
+
+    def tearDown(self) -> None:
+        self.game.quit()
+
+    def _bomb(self, x: float = 200, y: float = 80) -> Fruit:
+        return Fruit(
+            x=x,
+            y=y,
+            velocity_x=0,
+            velocity_y=0,
+            radius=20,
+            sliced=False,
+            active=True,
+            fruit_type="bomb",
+            color=(40, 42, 48),
+        )
+
+    def test_slicing_a_bomb_ends_the_round(self) -> None:
+        self.game.fruits.fruits = [self._bomb()]
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, 80.0), (400.0, 80.0)]
+        self.game.update()
+        self.assertTrue(self.game.game_over)
+        self.assertTrue(self.game.ended_by_bomb)
+        self.assertEqual(self.game.score, 0)
+
+    def test_slicing_a_bomb_does_not_keep_the_streak(self) -> None:
+        self.game.streak = 8
+        self.game.multiplier = 3
+        self.game.fruits.fruits = [self._bomb()]
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, 80.0), (400.0, 80.0)]
+        self.game.update()
+        self.assertTrue(self.game.game_over)
+        self.assertEqual(self.game.streak, 0)
+        self.assertEqual(self.game._floaters, [])
+
+    def test_timer_game_over_hides_streak(self) -> None:
+        self.game.streak = 6
+        self.game.time_left = 0.0
+        self.game.update()
+        self.assertTrue(self.game.game_over)
+        self.assertFalse(self.game.ended_by_bomb)
+        self.assertEqual(self.game.streak, 0)
+
+    def test_falling_bomb_does_not_end_the_round(self) -> None:
+        self.game.fruits.fruits = [
+            Fruit(
+                x=100,
+                y=400,
+                velocity_x=0,
+                velocity_y=400,
+                radius=20,
+                sliced=False,
+                active=True,
+                fruit_type="bomb",
+                color=(40, 42, 48),
+            )
+        ]
+        self.game.update()
+        self.assertFalse(self.game.game_over)
+        self.assertFalse(self.game.ended_by_bomb)
+
+    def test_fruit_sliced_with_a_bomb_does_not_score(self) -> None:
+        fruit = Fruit(
+            x=80,
+            y=80,
+            velocity_x=0,
+            velocity_y=0,
+            radius=20,
+            sliced=False,
+            active=True,
+            fruit_type="yuzu",
+            color=(220, 70, 70),
+        )
+        self.game.fruits.fruits = [fruit, self._bomb(x=240)]
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, 80.0), (400.0, 80.0)]
+        self.game.update()
+        self.assertTrue(self.game.game_over)
+        self.assertEqual(self.game.score, 0)
+
+    def test_restart_after_bomb_starts_a_new_round(self) -> None:
+        self.game.fruits.fruits = [self._bomb()]
+        self.game.blade_active = True
+        self.game.blade_segments = [(0.0, 80.0), (400.0, 80.0)]
+        self.game.update()
+        self.game.restart()
+        self.assertFalse(self.game.game_over)
+        self.assertFalse(self.game.ended_by_bomb)
+        self.assertAlmostEqual(self.game.time_left, float(config.ROUND_SECONDS))
+
+
 class PauseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.game = Game(width=400, height=300)
+        self.game.restart()
         self.game.fruits._time_to_spawn = 10.0
 
     def tearDown(self) -> None:
@@ -210,10 +402,45 @@ class PauseTests(unittest.TestCase):
         self.game.restart()
         self.assertFalse(self.game.paused)
 
+    def test_pause_gesture_icons_are_drawn(self) -> None:
+        point = self.game._gesture_icon("point", 32)
+        fist = self.game._gesture_icon("fist", 32)
+        self.assertGreater(int(pygame.surfarray.array_alpha(point).max()), 0)
+        self.assertGreater(int(pygame.surfarray.array_alpha(fist).max()), 0)
+        self.game.paused = True
+        self.game.render()
+
+    def test_fist_from_pause_returns_to_title(self) -> None:
+        self.game.paused = True
+        self.game.score = 11
+        self.game.high_score = 20
+        for _ in range(config.FIST_MENU_FRAMES - 1):
+            self.game.set_palm(False, fist=True)
+        self.assertTrue(self.game.paused)
+        self.game.set_palm(False, fist=True)
+        self.assertTrue(self.game.on_title)
+        self.assertFalse(self.game.paused)
+        self.assertEqual(self.game.score, 0)
+        self.assertEqual(self.game.high_score, 20)
+
+    def test_fist_while_playing_does_not_exit(self) -> None:
+        for _ in range(config.FIST_MENU_FRAMES):
+            self.game.set_palm(False, fist=True)
+        self.assertFalse(self.game.on_title)
+        self.assertFalse(self.game.paused)
+
+    def test_pointing_from_pause_does_not_open_the_menu(self) -> None:
+        self.game.paused = True
+        for _ in range(config.FIST_MENU_FRAMES):
+            self.game.set_palm(False, fist=False)
+        self.assertFalse(self.game.on_title)
+        self.assertFalse(self.game.paused)
+
 
 class ComboTests(unittest.TestCase):
     def setUp(self) -> None:
         self.game = Game(width=400, height=300)
+        self.game.restart()
         self.game.fruits._time_to_spawn = 10.0
 
     def tearDown(self) -> None:
@@ -264,6 +491,16 @@ class ComboTests(unittest.TestCase):
         self.assertEqual(combo_name(5), "AWESOME")
         self.assertEqual(combo_name(8), "INSANE")
         self.assertEqual(combo_name(15), "YUZU NINJA")
+
+    def test_higher_combos_run_hotter(self) -> None:
+        self.assertEqual(combo_heat(2), 0.0)
+        self.assertEqual(combo_heat(3), 0.0)
+        self.assertGreater(combo_heat(8), combo_heat(5))
+        self.assertEqual(combo_heat(15), 1.0)
+        cool_top, cool_bot = combo_colors(0.0)
+        hot_top, hot_bot = combo_colors(1.0)
+        self.assertGreater(cool_bot[1], hot_bot[1])
+        self.assertGreater(hot_top[2], cool_top[2])
 
     def test_streak_resets_after_the_window(self) -> None:
         self.game.streak = 5

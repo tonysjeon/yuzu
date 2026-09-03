@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from src.hand_tracker import is_open_palm
+from src.hand_tracker import is_fist, is_open_palm
 
 
 def _hand(
@@ -56,6 +56,15 @@ class PalmDetectionTests(unittest.TestCase):
 
     def test_fist_is_not_a_palm(self) -> None:
         self.assertFalse(is_open_palm(_curled()))
+        self.assertTrue(is_fist(_curled()))
+
+    def test_open_palm_is_not_a_fist(self) -> None:
+        self.assertFalse(is_fist(_open_palm()))
+
+    def test_pointing_index_is_not_a_fist(self) -> None:
+        pts = _curled()
+        pts[8] = (70.0, 40.0, 0.0)
+        self.assertFalse(is_fist(pts))
 
     def test_short_landmark_list_is_not_a_palm(self) -> None:
         self.assertFalse(is_open_palm([]))
