@@ -56,7 +56,19 @@ def main() -> int:
             now = time.perf_counter()
 
             hand = tracker.process(frame)
-            if hand["detected"] and hand["index_tip"] is not None:
+            live = bool(hand["detected"] and not hand.get("coasted"))
+            if live:
+                game.set_palm(bool(hand.get("palm")))
+            else:
+                # Lost or coasting: keep pause as-is instead of auto-resuming.
+                game.set_palm(None)
+
+            if (
+                hand["detected"]
+                and hand["index_tip"] is not None
+                and not hand.get("palm")
+                and not game.paused
+            ):
                 tip_x, tip_y = hand["index_tip"]
                 mapped = mapper.map(tip_x, tip_y)
                 game.set_fingertip(
@@ -75,11 +87,15 @@ def main() -> int:
                 swipe.reset()
 
             swipe_result = swipe.update(blade.points, now=now)
-            game.set_blade_points(
-                blade.curve() if swipe_result.active else [],
-                active=swipe_result.active,
-                velocity=swipe_result.velocity,
-            )
+            if game.paused:
+                game.set_blade_points([], active=False, velocity=0.0, segments=[])
+            else:
+                game.set_blade_points(
+                    blade.curve() if swipe_result.active else [],
+                    active=swipe_result.active,
+                    velocity=swipe_result.velocity,
+                    segments=blade.polyline() if swipe_result.active else [],
+                )
             game.update()
             game.render()
             game.tick()
