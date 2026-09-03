@@ -1,33 +1,33 @@
 # Yuzu
 
-Play a Fruit Ninja–style game with your index finger using a webcam and real-time hand tracking.
+Fruit Ninja with your webcam. Point a finger to slash; MediaPipe tracks your hand in real time.
 
-## Requirements
+## Stack
 
-- Python 3.11 or 3.12 (3.13+ is not supported yet — pygame has no wheels)
-- A working webcam
+- **Python** 3.11 or 3.12
+- **pygame** — window, sprites, HUD
+- **MediaPipe** — hand landmarks
+- **OpenCV** — camera capture
+- **NumPy** — rendering and physics helpers
+
+Uses the laptop webcam on Windows and Mac.
 
 ## Setup
 
 ```bash
 python3.12 -m venv venv
-source venv/bin/activate
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Use `python3.11` instead if that is what you have installed.
+Python 3.13+ won’t work yet — pygame doesn’t ship wheels for it.
 
-## Run
+## Play
 
 ```bash
 python main.py
 ```
 
-Opens a `yuzu` game window and draws your index fingertip as a circle. Apples,
-oranges, and watermelons launch from the bottom in arcs under gravity. A white
-blade trail appears only when you swipe fast enough (idle tips stay dim). Hand
-motion is mapped through an active camera region so small movements can cover
-the full screen. Uses the Mac's built-in camera (Continuity Camera / iPhone is
-skipped). The window is resizable. Press `q` or `Esc` to quit.
+Swipe through fruit for points. Combos raise a multiplier; three or more in one slash awards a bonus. Open palm pauses (or press `P`); point again to resume. `R` / Space restarts after time’s up. `Q` / Esc quits.
 
-If the camera fails to open on macOS, enable **Camera** access for Terminal (or Cursor) under **System Settings → Privacy & Security → Camera**, then rerun.
+If the camera won’t open, allow Camera access for your terminal in system privacy settings, then run again.

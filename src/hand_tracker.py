@@ -44,6 +44,7 @@ class HandResult(TypedDict):
     landmarks: list[tuple[float, float, float]]
     coasted: bool
     pointer_finger: str | None
+    palm: bool
 
 
 def _xy(landmarks: list[tuple[float, float, float]], index: int) -> np.ndarray:
@@ -72,6 +73,23 @@ def _reach(
     if palm < 1.0:
         return 0.0
     return float(np.linalg.norm(_xy(landmarks, tip_i) - wrist)) / palm
+
+
+def is_open_palm(landmarks: list[tuple[float, float, float]]) -> bool:
+    """True when every non-thumb finger is extended, not a pointing pose.
+
+    A point has one finger reaching far past the rest. A pause palm has all
+    four stretched a similar amount.
+    """
+    if len(landmarks) < 21:
+        return False
+    reaches = [_reach(landmarks, chain[0]) for chain in _FINGER_CHAINS.values()]
+    if any(r < config.HAND_PALM_MIN_REACH for r in reaches):
+        return False
+    shortest = min(reaches)
+    if shortest <= 0.0:
+        return False
+    return max(reaches) <= shortest * config.HAND_PALM_EVENNESS
 
 
 class HandTracker:
@@ -304,6 +322,7 @@ class HandTracker:
             "landmarks": landmarks,
             "coasted": False,
             "pointer_finger": finger,
+            "palm": is_open_palm(landmarks),
         }
 
     def process(self, frame_bgr: np.ndarray) -> HandResult:
@@ -366,6 +385,7 @@ class HandTracker:
                 "landmarks": self._last_landmarks,
                 "coasted": True,
                 "pointer_finger": self._pointer_finger,
+                "palm": False,
             }
 
         if (now - self._last_seen) > max(self._coast_s, self._search_s):
@@ -378,6 +398,7 @@ class HandTracker:
             "landmarks": [],
             "coasted": False,
             "pointer_finger": None,
+            "palm": False,
         }
 
     def close(self) -> None:
