@@ -1,4 +1,9 @@
-"""Webcam capture helpers."""
+"""Webcam capture helpers.
+
+On macOS the built-in FaceTime camera is opened through AVFoundation's
+built-in wide-angle device type only. Continuity Camera / iPhone is never
+enumerated, so the phone is never asked to connect.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +13,8 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import TypedDict
 
 import cv2
 import numpy as np
@@ -15,78 +22,31 @@ import numpy as np
 from src import config
 
 _SKIP_NAME_PATTERN = re.compile(
-    r"iphone|ipad|continuity|desk\s*view|apple\s*continuity",
+    r"iphone|ipad|ios\s*camera|continuity|desk\s*view|"
+    r"apple\s*continuity|sidecar|center\s*stage|camo|"
+    r"continuity\s*camera",
     re.IGNORECASE,
 )
 _BUILTIN_NAME_PATTERN = re.compile(
     r"facetime|macbook|built-?in|isight",
     re.IGNORECASE,
 )
+_BUILTIN_TYPE_PATTERN = re.compile(r"builtin", re.IGNORECASE)
+_SKIP_TYPE_PATTERN = re.compile(
+    r"continuity|deskview|desk.?view|external",
+    re.IGNORECASE,
+)
+
+_HELPER_SRC = Path(__file__).resolve().parent / "facetime_cam.swift"
+_HELPER_BIN = Path(__file__).resolve().parent.parent / ".cache" / "facetime_cam"
 
 
-def _camera_names_via_system_profiler() -> list[str]:
-    """Return camera names in system order (usually matches OpenCV indexes)."""
-    if platform.system() != "Darwin":
-        return []
-    try:
-        result = subprocess.run(
-            ["system_profiler", "SPCameraDataType", "-json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return []
-
-    cameras = payload.get("SPCameraDataType") or []
-    return [str(cam.get("_name", "")).strip() for cam in cameras if cam.get("_name")]
-
-
-def _builtin_camera_name_via_swift() -> str | None:
-    """Return the localized name of the Mac built-in wide camera."""
-    if platform.system() != "Darwin":
-        return None
-
-    script = r"""
-import AVFoundation
-import Foundation
-
-let devices = AVCaptureDevice.DiscoverySession(
-    deviceTypes: [.builtInWideAngleCamera],
-    mediaType: .video,
-    position: .unspecified
-).devices
-
-guard let builtin = devices.first else {
-    fputs("NO_BUILTIN\n", stderr)
-    exit(2)
-}
-print(builtin.localizedName)
-"""
-    try:
-        result = subprocess.run(
-            ["swift", "-"],
-            input=script,
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-    if result.returncode != 0:
-        return None
-    name = result.stdout.strip().splitlines()
-    return name[0].strip() if name else None
+class AVDevice(TypedDict):
+    index: int
+    name: str
+    type: str
+    unique_id: str
+    builtin: bool
 
 
 def _is_skipped_name(name: str) -> bool:
@@ -97,27 +57,51 @@ def _is_builtin_name(name: str) -> bool:
     return bool(_BUILTIN_NAME_PATTERN.search(name))
 
 
-def resolve_webcam_candidates(names: list[str] | None = None) -> list[int]:
-    """Ordered OpenCV indexes to try, FaceTime/built-in first, Continuity never."""
-    camera_names = names if names is not None else _camera_names_via_system_profiler()
-    builtin_name = _builtin_camera_name_via_swift()
+def _is_phone_or_continuity(device: AVDevice) -> bool:
+    if device["builtin"]:
+        return False
+    if _SKIP_TYPE_PATTERN.search(device["type"]):
+        return True
+    if _is_skipped_name(device["name"]):
+        return True
+    unique = device["unique_id"].lower()
+    if "continuity" in unique or "iphone" in unique:
+        return True
+    return False
+
+
+def _is_facetime_device(device: AVDevice) -> bool:
+    if _is_phone_or_continuity(device):
+        return False
+    if device["builtin"] or _BUILTIN_TYPE_PATTERN.search(device["type"]):
+        return True
+    return _is_builtin_name(device["name"])
+
+
+def resolve_webcam_candidates(
+    names: list[str] | None = None,
+    av_devices: list[AVDevice] | None = None,
+    system: str | None = None,
+) -> list[int]:
+    """Ordered OpenCV indexes to try.
+
+    macOS: FaceTime only — never Continuity/iPhone (index 0 is usually the phone).
+    Windows/Linux: built-in laptop webcam is almost always index 0.
+    """
+    devices = list(av_devices or [])
+    camera_names = list(names or [])
     preferred: list[int] = []
+    host = system if system is not None else platform.system()
 
     def add(index: int) -> None:
         if index not in preferred:
             preferred.append(index)
 
-    # Match AVFoundation built-in name against system_profiler / OpenCV order.
-    if builtin_name and camera_names:
-        for index, name in enumerate(camera_names):
-            if _is_skipped_name(name):
-                continue
-            if (
-                name == builtin_name
-                or builtin_name.lower() in name.lower()
-                or name.lower() in builtin_name.lower()
-            ):
-                add(index)
+    if devices:
+        for device in devices:
+            if _is_facetime_device(device):
+                add(device["index"])
+        return preferred
 
     if camera_names:
         for index, name in enumerate(camera_names):
@@ -125,19 +109,149 @@ def resolve_webcam_candidates(names: list[str] | None = None) -> list[int]:
                 continue
             if _is_builtin_name(name):
                 add(index)
-        for index, name in enumerate(camera_names):
-            if not _is_skipped_name(name):
-                add(index)
         return preferred
 
-    # No names (permissions / timing). Continuity is usually 0 — try 1 first.
-    for index in (1, 0, 2, 3, 4):
+    if host == "Darwin":
+        # Continuity is usually 0 — never try it when we cannot read names.
+        for index in (1, 2, 3, 4):
+            add(index)
+        return preferred
+
+    for index in (0, 1, 2, 3, 4):
         add(index)
     return preferred
 
 
+def _ensure_facetime_helper() -> Path:
+    if not _HELPER_SRC.is_file():
+        raise RuntimeError(f"FaceTime capture helper missing at {_HELPER_SRC}")
+    _HELPER_BIN.parent.mkdir(parents=True, exist_ok=True)
+    src_mtime = _HELPER_SRC.stat().st_mtime
+    if _HELPER_BIN.is_file() and _HELPER_BIN.stat().st_mtime >= src_mtime:
+        return _HELPER_BIN
+    result = subprocess.run(
+        [
+            "swiftc",
+            "-O",
+            "-o",
+            str(_HELPER_BIN),
+            str(_HELPER_SRC),
+            "-framework",
+            "AVFoundation",
+            "-framework",
+            "CoreMedia",
+            "-framework",
+            "CoreVideo",
+            "-framework",
+            "Foundation",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0 or not _HELPER_BIN.is_file():
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            "Could not build the built-in FaceTime capture helper. "
+            f"{detail or 'swiftc failed.'}"
+        )
+    return _HELPER_BIN
+
+
+def _read_exact(stream, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        piece = stream.read(size - len(chunks))
+        if not piece:
+            return b""
+        chunks.extend(piece)
+    return bytes(chunks)
+
+
+class _FaceTimeCapture:
+    """macOS built-in wide-angle camera; never probes Continuity / iPhone."""
+
+    def __init__(self, width: int, height: int) -> None:
+        helper = _ensure_facetime_helper()
+        self._proc = subprocess.Popen(
+            [str(helper), str(width), str(height)],
+            stdout=subprocess.PIPE,
+            stderr=None,
+        )
+        stdout = self._proc.stdout
+        if stdout is None:
+            self.release()
+            raise RuntimeError("Built-in camera helper has no stdout.")
+        header_line = stdout.readline()
+        if not header_line:
+            code = self._proc.poll()
+            self.release()
+            raise RuntimeError(
+                "Unable to open the Mac FaceTime webcam. Continuity Camera "
+                "(iPhone) is never used. Grant Camera access under "
+                "System Settings → Privacy & Security → Camera, then try again."
+                + (f" Helper exit {code}." if code else "")
+            )
+        try:
+            meta = json.loads(header_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.release()
+            raise RuntimeError(f"Built-in camera helper sent a bad header: {exc}") from exc
+        self.name = str(meta.get("name") or "MacBook Camera")
+        self.width = int(meta.get("width") or width)
+        self.height = int(meta.get("height") or height)
+        self._stdout = stdout
+
+    def read(self) -> np.ndarray | None:
+        header = _read_exact(self._stdout, 4)
+        if len(header) < 4:
+            return None
+        size = int.from_bytes(header, "big")
+        if size <= 0 or size > 32_000_000:
+            return None
+        payload = _read_exact(self._stdout, size)
+        if len(payload) < size:
+            return None
+        bgra = np.frombuffer(payload, dtype=np.uint8)
+        try:
+            bgra = bgra.reshape((self.height, self.width, 4))
+        except ValueError:
+            return None
+        return cv2.flip(np.ascontiguousarray(bgra[:, :, :3]), 1)
+
+    def release(self) -> None:
+        proc = getattr(self, "_proc", None)
+        if proc is None:
+            return
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=1.0)
+        self._proc = None
+
+
+def _opencv_backends() -> tuple[int, ...]:
+    host = platform.system()
+    if host == "Windows":
+        backends: list[int] = []
+        if hasattr(cv2, "CAP_MSMF"):
+            backends.append(cv2.CAP_MSMF)
+        if hasattr(cv2, "CAP_DSHOW"):
+            backends.append(cv2.CAP_DSHOW)
+        backends.append(cv2.CAP_ANY)
+        return tuple(backends)
+    if host == "Darwin":
+        return (cv2.CAP_AVFOUNDATION, cv2.CAP_ANY)
+    if hasattr(cv2, "CAP_V4L2"):
+        return (cv2.CAP_V4L2, cv2.CAP_ANY)
+    return (cv2.CAP_ANY,)
+
+
 def _open_capture(device_index: int) -> cv2.VideoCapture | None:
-    for backend in (cv2.CAP_AVFOUNDATION, cv2.CAP_ANY):
+    for backend in _opencv_backends():
         cap = cv2.VideoCapture(device_index, backend)
         if not cap.isOpened():
             cap.release()
@@ -147,59 +261,69 @@ def _open_capture(device_index: int) -> cv2.VideoCapture | None:
 
 
 class Camera:
-    """Open the built-in Mac webcam and return mirrored frames."""
+    """Open the built-in webcam and return mirrored frames."""
 
     def __init__(
         self,
         width: int = config.CAMERA_WIDTH,
         height: int = config.CAMERA_HEIGHT,
     ) -> None:
-        names = _camera_names_via_system_profiler()
-        candidates = resolve_webcam_candidates(names)
         self.device_index = -1
         self.device_name = "unknown"
         self._cap: cv2.VideoCapture | None = None
+        self._facetime: _FaceTimeCapture | None = None
 
+        if platform.system() == "Darwin":
+            self._facetime = _FaceTimeCapture(width, height)
+            self.device_name = self._facetime.name
+            if _is_skipped_name(self.device_name):
+                self._facetime.release()
+                self._facetime = None
+                raise RuntimeError(
+                    "Refusing to use a Continuity / iPhone camera. "
+                    "The built-in FaceTime camera was not available."
+                )
+            self._width = self._facetime.width
+            self._height = self._facetime.height
+            print(
+                f"Using built-in FaceTime camera: {self.device_name}",
+                file=sys.stderr,
+            )
+            return
+
+        self._open_opencv(width, height)
+
+    def _open_opencv(self, width: int, height: int) -> None:
+        candidates = resolve_webcam_candidates(names=[], av_devices=[])
         for index in candidates:
-            if index < len(names) and _is_skipped_name(names[index]):
-                continue
-
             cap = _open_capture(index)
             if cap is None:
                 continue
-
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            # Drop stale buffered frames so the tip tracks the live hand.
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-            if self._grab_first_frame(cap) is not None:
-                # Final guard: never keep a Continuity / iPhone device by name.
-                label = names[index] if index < len(names) else f"index {index}"
-                if _is_skipped_name(label):
-                    cap.release()
-                    continue
-
-                self._cap = cap
-                self.device_index = index
-                self.device_name = label
-                break
-
-            cap.release()
+            if self._grab_first_frame(cap) is None:
+                cap.release()
+                continue
+            self._cap = cap
+            self.device_index = index
+            self.device_name = f"index {index}"
+            break
 
         if self._cap is None:
+            if platform.system() == "Windows":
+                raise RuntimeError(
+                    "Unable to open the laptop webcam. Allow Camera access "
+                    "under Settings → Privacy & security → Camera for this "
+                    "app (Terminal, Python, or Cursor), then try again."
+                )
             raise RuntimeError(
-                "Unable to open the Mac FaceTime webcam. Continuity Camera "
-                "(iPhone) is ignored on purpose. Grant Camera access under "
-                "System Settings → Privacy & Security → Camera, put the "
-                "iPhone away/lock Continuity Camera if needed, then try again."
+                "Unable to open a webcam. Continuity Camera (iPhone) is never used."
             )
-
         print(
             f"Using camera {self.device_index}: {self.device_name}",
             file=sys.stderr,
         )
-
         actual_width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._width = actual_width if actual_width > 0 else width
@@ -224,6 +348,8 @@ class Camera:
 
     def read(self) -> np.ndarray | None:
         """Return the next mirrored frame, or None if capture failed."""
+        if self._facetime is not None:
+            return self._facetime.read()
         assert self._cap is not None
         ok, frame = self._cap.read()
         if not ok or frame is None:
@@ -232,6 +358,9 @@ class Camera:
 
     def release(self) -> None:
         """Release the webcam device."""
+        if self._facetime is not None:
+            self._facetime.release()
+            self._facetime = None
         if self._cap is not None and self._cap.isOpened():
             self._cap.release()
         self._cap = None

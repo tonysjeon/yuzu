@@ -19,6 +19,7 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+.cache/
 
 # OS / editor
 .DS_Store
