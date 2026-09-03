@@ -38,6 +38,8 @@ class FruitManager:
         self.pieces: list[FruitHalf] = []
         self.splatter = Splatter(self._rng)
         self.last_slice_at: tuple[float, float] | None = None
+        self.hit_bomb = False
+        self._hazard_rng = random.Random()
         self._progress = 0.0
         self._time_to_spawn = self._next_interval()
 
@@ -55,10 +57,17 @@ class FruitManager:
             lo, hi = hi, lo
         return self._rng.uniform(lo, hi)
 
-    def spawn(self, width: int, height: int) -> Fruit:
-        """Toss one fruit from below the screen so its arc stays in view."""
-        kind = self._rng.choice(list(FRUIT_STYLES.keys()))
-        color, radius = FRUIT_STYLES[kind]
+    def spawn(self, width: int, height: int, kind: str | None = None) -> Fruit:
+        """Toss one fruit (or bomb) from below the screen so its arc stays in view."""
+        if kind is None:
+            kind = self._rng.choice(list(FRUIT_STYLES.keys()))
+            chance = self._lerp(config.BOMB_CHANCE_START, config.BOMB_CHANCE_END)
+            if self._hazard_rng.random() < chance:
+                kind = "bomb"
+        if kind == "bomb":
+            color, radius = (40, 42, 48), config.BOMB_RADIUS
+        else:
+            color, radius = FRUIT_STYLES[kind]
         pad = radius + config.FRUIT_SIDE_PAD
         center = width * 0.5
         spawn_span = max(width * config.FRUIT_SPAWN_HALF_SPAN, 1.0)
@@ -133,7 +142,7 @@ class FruitManager:
             if fruit.y - fruit.radius > cull:
                 fruit.active = False
                 # Spawned below the screen while rising is not a miss.
-                if fruit.velocity_y > 0 and not fruit.sliced:
+                if fruit.velocity_y > 0 and not fruit.sliced and not fruit.is_bomb:
                     misses += 1
                 continue
             keep.append(fruit)
@@ -152,6 +161,7 @@ class FruitManager:
 
     def slice_with_blade(self, points: list[tuple[float, float]]) -> int:
         """Split fruits the blade grazes into two flying halves."""
+        self.hit_bomb = False
         sliced = 0
         keep: list[Fruit] = []
         for fruit in self.fruits:
@@ -163,11 +173,14 @@ class FruitManager:
                 continue
             fruit.sliced = True
             fruit.active = False
-            self.pieces.extend(fruit.split(*axis))
+            self.last_slice_at = (fruit.x, fruit.y)
             self.splatter.burst(
                 fruit.x, fruit.y, axis[0], axis[1], fruit.fruit_type, fruit.radius
             )
-            self.last_slice_at = (fruit.x, fruit.y)
+            if fruit.is_bomb:
+                self.hit_bomb = True
+                continue
+            self.pieces.extend(fruit.split(*axis))
             sliced += 1
         self.fruits = keep
         return sliced
@@ -177,6 +190,7 @@ class FruitManager:
         self.pieces.clear()
         self.splatter.clear()
         self.last_slice_at = None
+        self.hit_bomb = False
         self._progress = 0.0
         self._time_to_spawn = self._next_interval()
 

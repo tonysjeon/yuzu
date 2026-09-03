@@ -14,6 +14,7 @@ _JUICE: dict[str, tuple[tuple[int, int, int], tuple[int, int, int]]] = {
     "yuzu": ((255, 236, 110), (255, 196, 28)),
     "orange": ((255, 176, 64), (255, 112, 16)),
     "watermelon": ((255, 64, 86), (196, 20, 44)),
+    "bomb": ((255, 170, 48), (40, 28, 24)),
 }
 
 
@@ -50,7 +51,7 @@ class Splatter:
         tx, ty = cut_dx / length, cut_dy / length
         nx, ny = -ty, tx
         bright, dark = _JUICE.get(kind, _JUICE["yuzu"])
-        count = 28 if kind == "watermelon" else 24
+        count = 36 if kind == "bomb" else 28 if kind == "watermelon" else 24
         for i in range(count):
             along = self._rng.uniform(-1.0, 1.0)
             out = self._rng.choice((-1.0, 1.0)) * self._rng.uniform(0.25, 1.15)

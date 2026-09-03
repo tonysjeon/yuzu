@@ -28,6 +28,6 @@ Python 3.13+ won’t work yet — pygame doesn’t ship wheels for it.
 python main.py
 ```
 
-Swipe through fruit for points. Combos raise a multiplier; three or more in one slash awards a bonus. Open palm pauses (or press `P`); point again to resume. `R` / Space restarts after time’s up. `Q` / Esc quits.
+Point a finger at the yuzu on the title screen and slash to start. Swipe through fruit for points. Combos raise a multiplier; three or more in one slash awards a bonus. Miss the bombs — slicing one ends the round. Open palm pauses (or press `P`); point again to resume, or make a fist to return to the menu. `R` / Space restarts after a round. `Q` / Esc quits.
 
 If the camera won’t open, allow Camera access for your terminal in system privacy settings, then run again.

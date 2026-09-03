@@ -68,6 +68,19 @@ HAND_PALM_EVENNESS = 1.35
 # Consecutive confirmed-palm / not-palm frames before pause / resume.
 PALM_PAUSE_FRAMES = 6
 PALM_RESUME_FRAMES = 4
+# All four fingers shorter than this (tip-to-wrist / palm) counts as a fist.
+HAND_FIST_MAX_REACH = 1.22
+# Consecutive fist frames while paused before returning to the title screen.
+FIST_MENU_FRAMES = 6
+
+# After the title yuzu is sliced, wait this long so the cut reads.
+TITLE_START_DELAY = 0.22
+# Title overlay slides down this long, then play begins.
+TITLE_SLIDE_SECONDS = 0.55
+# After the slide, wait this long before the clock ticks so the first toss is up.
+ROUND_TIMER_DELAY = 1.05
+# First toss after leaving the title screen.
+TITLE_FIRST_SPAWN = 0.18
 
 # Legacy exponential smoother alpha (kept for debug comparisons).
 SMOOTHING_ALPHA = 0.4
@@ -98,6 +111,10 @@ FRUIT_MAX_SPAWN_INTERVAL_END = 0.75
 # After this fraction of the round, tosses can throw two fruits at once.
 FRUIT_DOUBLE_SPAWN_START = 0.45
 FRUIT_DOUBLE_SPAWN_CHANCE = 0.35
+# Chance a toss is a bomb instead of fruit; ramps toward *_END like Classic FN.
+BOMB_CHANCE_START = 0.12
+BOMB_CHANCE_END = 0.22
+BOMB_RADIUS = 50.0
 # Peak height as a fraction of the window, measured from the top.
 FRUIT_PEAK_MIN = 0.18
 FRUIT_PEAK_MAX = 0.42

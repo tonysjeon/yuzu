@@ -94,44 +94,44 @@ def _draw_rotated(
 _icons: dict[tuple[str, int], pygame.Surface] = {}
 
 
+def _crop_opaque(surf: pygame.Surface, pad: int = 2) -> pygame.Surface:
+    """Tight box around visible pixels so a cut half fills the HUD badge."""
+    alpha = pygame.surfarray.array_alpha(surf)
+    xs, ys = np.where(alpha > 10)
+    if xs.size == 0:
+        return surf
+    x0 = max(int(xs.min()) - pad, 0)
+    x1 = min(int(xs.max()) + pad + 1, surf.get_width())
+    y0 = max(int(ys.min()) - pad, 0)
+    y1 = min(int(ys.max()) + pad + 1, surf.get_height())
+    return surf.subsurface((x0, y0, x1 - x0, y1 - y0)).copy()
+
+
 def cut_fruit_icon(kind: str, size: int) -> pygame.Surface | None:
-    """HUD badge: a halved fruit showing its flesh, Fruit Ninja style."""
+    """HUD badge: a turned cut half, same hemisphere as a sliced fruit."""
     key = (kind, size)
     cached = _icons.get(key)
     if cached is not None:
         return cached
-    skin = _sprite_at(kind, size * 2)
+    raster = max(size * 3, 160)
+    skin = _sprite_at(kind, raster)
     if skin is None:
         return None
-    ss = size * 2
-    extent = 1.15
-    u = np.linspace(-extent, extent, ss, dtype=np.float32)[:, None]
-    v = np.linspace(-extent, extent, ss, dtype=np.float32)[None, :]
-    face_v = (v + 0.10) / 0.92
-    face = u * u + face_v * face_v <= 1.0
-    shell_v = v - 0.18
-    shell = (u * u + shell_v * shell_v <= 1.0) & ~face
-
-    flesh = _flesh_albedo(kind, u, face_v)
-    light = np.clip(0.88 + 0.18 * (-0.4 * u - 0.5 * face_v), 0.7, 1.05)
-    # Deepen the pale citrus so the badge reads against dark wood.
-    flesh = flesh * light[..., None] * np.array((1.0, 0.94, 0.66), dtype=np.float32)
-
-    rgb_arr, a_arr = _skin_arrays(skin)
-    sampled, samp_a = _sample_sprite(rgb_arr, a_arr, u, shell_v)
-    skin_rgb = sampled * 0.62
-
-    out = np.zeros((ss, ss, 3), dtype=np.float32)
-    out[face] = flesh[face]
-    out[shell] = skin_rgb[shell]
-    alpha = np.zeros((ss, ss), dtype=np.float32)
-    alpha[face] = 255.0
-    alpha[shell] = np.clip(samp_a[shell], 200, 255)
-
-    surf = pygame.Surface((ss, ss), pygame.SRCALPHA)
-    pygame.surfarray.blit_array(surf, np.clip(out, 0, 255).astype(np.uint8))
-    pygame.surfarray.pixels_alpha(surf)[:, :] = alpha.astype(np.uint8)
-    icon = pygame.transform.smoothscale(surf, (size, size))
+    # Same cap as in-game halves. Tip it, then turn the cut face toward the
+    # top-left so it reads against the score in the HUD corner.
+    half = _render_half_cap(kind, skin, -0.82, -0.28)
+    turned = pygame.transform.rotozoom(_crop_opaque(half), -32.0, 1.0)
+    turned = pygame.transform.rotate(turned, 180)
+    turned = _crop_opaque(turned, pad=1)
+    tw, th = turned.get_size()
+    scale = size / max(tw, th, 1)
+    icon = pygame.transform.smoothscale(
+        turned, (max(int(round(tw * scale)), 1), max(int(round(th * scale)), 1))
+    )
+    try:
+        icon = icon.convert_alpha()
+    except pygame.error:
+        pass
     _icons[key] = icon
     return icon
 
@@ -561,6 +561,10 @@ class Fruit:
     color: tuple[int, int, int]
     rotation: float = 0.0
     rotation_speed: float = 0.0
+
+    @property
+    def is_bomb(self) -> bool:
+        return self.fruit_type == "bomb"
 
     def sprite_size(self) -> int:
         return max(int(self.radius * 2.4), 8)

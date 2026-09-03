@@ -10,7 +10,7 @@ import numpy as np
 import pygame
 
 from game.background import build_dojo_wall
-from game.fruit import cut_fruit_icon, warm_cut_cache
+from game.fruit import FRUIT_STYLES, Fruit, cut_fruit_icon, warm_cut_cache
 from game.fruit_manager import FruitManager
 from src import config
 
@@ -51,6 +51,34 @@ def combo_name(count: int) -> str | None:
     return label
 
 
+def combo_heat(count: int) -> float:
+    """0 at the first named combo, 1 at the highest shoutout."""
+    rank = 0
+    for i, (threshold, _) in enumerate(_COMBO_NAMES):
+        if count >= threshold:
+            rank = i + 1
+    if rank <= 0:
+        return 0.0
+    return (rank - 1) / max(len(_COMBO_NAMES) - 1, 1)
+
+
+def combo_colors(heat: float) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """Gold at low combos, white-hot into red at the top ranks."""
+    t = min(max(heat, 0.0), 1.0)
+    t = t * t * (3.0 - 2.0 * t)
+    top = (
+        int(255),
+        int(232 + (252 - 232) * t),
+        int(96 + (220 - 96) * t),
+    )
+    bottom = (
+        int(255),
+        int(150 + (28 - 150) * t),
+        int(24 + (12 - 24) * t),
+    )
+    return top, bottom
+
+
 @dataclass
 class _Floater:
     text: str
@@ -59,6 +87,7 @@ class _Floater:
     life: float
     max_life: float
     kind: str
+    heat: float = 0.0
 
 
 class Game:
@@ -88,6 +117,12 @@ class Game:
         self.paused = False
         self._palm_frames = 0
         self._play_frames = 0
+        self._fist_frames = 0
+        self._title_start_in: float | None = None
+        self._title_pulse = 0.0
+        self._title_sliding = False
+        self._title_slide = 0.0
+        self._timer_hold = 0.0
         self.streak = 0
         self.multiplier = 1
         self._combo_timer = 0.0
@@ -97,6 +132,8 @@ class Game:
         self._floaters: list[_Floater] = []
         # Session best only — closing the game clears it.
         self.high_score = 0
+        self.ended_by_bomb = False
+        self.on_title = True
         self._score_font: pygame.font.Font | None = None
         self._best_font: pygame.font.Font | None = None
         self._title_font: pygame.font.Font | None = None
@@ -107,6 +144,7 @@ class Game:
         self._clock_block_w = 0
         self._text_cache: dict[tuple, pygame.Surface] = {}
         self._fx: pygame.Surface | None = None
+        self._title_layer: pygame.Surface | None = None
         self._set_mode(width, height)
 
     def _pick_font(self, names: tuple[str, ...], size: int, bold: bool = False) -> pygame.font.Font:
@@ -157,6 +195,7 @@ class Game:
         )
         self._background = build_dojo_wall(width, height)
         self._fx = pygame.Surface((width, height), pygame.SRCALPHA)
+        self._title_layer = pygame.Surface((width, height), pygame.SRCALPHA)
         self._text_cache = {}
         number_size = max(int(height * 0.095), 46)
         best_size = max(int(height * 0.034), 18)
@@ -176,6 +215,8 @@ class Game:
         if self._score_font is not None:
             self._clock_block_w = self._ninja_text(self._score_font, "0:00").get_width()
         warm_cut_cache()
+        if self.on_title and self._title_start_in is None and not self._title_sliding:
+            self._place_title_fruit()
 
     def handle_events(self) -> None:
         for event in pygame.event.get():
@@ -189,7 +230,7 @@ class Game:
             ):
                 self.running = False
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_p:
-                if not self.game_over:
+                if not self.game_over and not self.on_title:
                     self._toggle_pause()
             elif event.type == pygame.KEYDOWN and event.key in (
                 pygame.K_r,
@@ -199,7 +240,7 @@ class Game:
                 if self.game_over:
                     self.restart()
 
-    def restart(self) -> None:
+    def restart(self, *, from_title: bool = False) -> None:
         self.fruits.clear()
         self.score = 0
         self.time_left = float(config.ROUND_SECONDS)
@@ -214,36 +255,167 @@ class Game:
         self._prev_blade_active = False
         self._streak_pulse = 1.0
         self._floaters = []
+        self.ended_by_bomb = False
+        self.on_title = False
+        self._title_start_in = None
+        self._title_pulse = 0.0
+        self._title_sliding = False
+        self._title_slide = 0.0
+        self._timer_hold = config.ROUND_TIMER_DELAY if from_title else 0.0
+        self._fist_frames = 0
         self.blade_points = []
         self.blade_segments = []
         self.blade_active = False
+        if from_title:
+            self.fruits._time_to_spawn = config.TITLE_FIRST_SPAWN
 
     def _toggle_pause(self) -> None:
         self.paused = not self.paused
         self._palm_frames = 0
         self._play_frames = 0
+        self._fist_frames = 0
         if self.paused:
             self.blade_points = []
             self.blade_segments = []
             self.blade_active = False
 
-    def set_palm(self, palm: bool | None) -> None:
-        """Debounced open palm → pause, pointing hand → resume. None leaves state as-is."""
-        if self.game_over or palm is None:
+    def go_to_title(self) -> None:
+        """Leave a paused round and return to the start screen."""
+        self.fruits.clear()
+        self.score = 0
+        self.time_left = float(config.ROUND_SECONDS)
+        self.game_over = False
+        self.paused = False
+        self._palm_frames = 0
+        self._play_frames = 0
+        self._fist_frames = 0
+        self.streak = 0
+        self.multiplier = 1
+        self._combo_timer = 0.0
+        self._swipe_hits = 0
+        self._prev_blade_active = False
+        self._streak_pulse = 1.0
+        self._floaters = []
+        self.ended_by_bomb = False
+        self.on_title = True
+        self._title_start_in = None
+        self._title_pulse = 0.0
+        self._title_sliding = False
+        self._title_slide = 0.0
+        self._timer_hold = 0.0
+        self.blade_points = []
+        self.blade_segments = []
+        self.blade_active = False
+        self._place_title_fruit()
+
+    def _place_title_fruit(self) -> None:
+        """Put a whole yuzu under the title instructions so it's the thing to slash."""
+        color, radius = FRUIT_STYLES["yuzu"]
+        x, y = self._title_fruit_pos(radius)
+        self.fruits.clear()
+        self.fruits._time_to_spawn = 10.0
+        self.fruits.fruits = [
+            Fruit(
+                x=x,
+                y=y,
+                velocity_x=0.0,
+                velocity_y=0.0,
+                radius=radius,
+                sliced=False,
+                active=True,
+                fruit_type="yuzu",
+                color=color,
+                rotation=0.0,
+                rotation_speed=0.0,
+            )
+        ]
+
+    def _title_fruit_pos(self, radius: float) -> tuple[float, float]:
+        layout = self._title_layout(radius)
+        return self.width * 0.5, layout["fruit_y"]
+
+    def _title_layout(self, radius: float | None = None) -> dict[str, float]:
+        """Stack YUZU, the hint, then the fruit as one centered block."""
+        if radius is None:
+            radius = FRUIT_STYLES["yuzu"][1]
+        title_h = 80.0
+        hint_h = 40.0
+        if self._title_font is not None:
+            title_h = float(
+                self._ninja_text(self._title_font, "YUZU", outline_width=4, shadow=6).get_height()
+            )
+        if self._hint_font is not None:
+            hint_h = float(
+                self._ninja_text(
+                    self._hint_font,
+                    "POINT A FINGER AND SLASH",
+                    top=(240, 236, 228),
+                    bottom=(196, 190, 180),
+                    outline_width=2,
+                    shadow=2,
+                ).get_height()
+            )
+        visual = radius * 2.4
+        # ninja_text surfaces include outline pad; overlap so the glyphs sit tight.
+        title_to_hint = title_h - 20.0
+        title_y = self.height * 0.30
+        hint_y = title_y + title_to_hint
+        # Sit the slash target lower, with room for the sprite above the bottom edge.
+        fruit_y = min(self.height * 0.62, self.height - visual * 0.5 - 28.0)
+        fruit_y = max(fruit_y, hint_y + hint_h * 0.35 + visual * 0.5)
+        return {"title_y": title_y, "hint_y": hint_y, "fruit_y": fruit_y}
+
+    def set_palm(self, palm: bool | None, fist: bool = False) -> None:
+        """Open palm pauses; pointing resumes; a fist from pause returns to title."""
+        if self.game_over or self.on_title or palm is None:
             return
         if palm:
             self._palm_frames += 1
             self._play_frames = 0
+            self._fist_frames = 0
             if not self.paused and self._palm_frames >= config.PALM_PAUSE_FRAMES:
                 self.paused = True
                 self.blade_points = []
                 self.blade_segments = []
                 self.blade_active = False
-        else:
-            self._play_frames += 1
+            return
+        if fist:
             self._palm_frames = 0
-            if self.paused and self._play_frames >= config.PALM_RESUME_FRAMES:
-                self.paused = False
+            self._play_frames = 0
+            if not self.paused:
+                self._fist_frames = 0
+                return
+            self._fist_frames += 1
+            if self._fist_frames >= config.FIST_MENU_FRAMES:
+                self.go_to_title()
+            return
+        self._play_frames += 1
+        self._palm_frames = 0
+        self._fist_frames = 0
+        if self.paused and self._play_frames >= config.PALM_RESUME_FRAMES:
+            self.paused = False
+
+    def _tick_title(self, dt: float) -> None:
+        if self._title_start_in is not None:
+            self.fruits.update(dt, self.width, self.height, spawn=False)
+            self._title_start_in -= dt
+            if self._title_start_in <= 0.0:
+                self._title_start_in = None
+                self._title_sliding = True
+                self._title_slide = 0.0
+            return
+        if self._title_sliding:
+            self.fruits.update(dt, self.width, self.height, spawn=False)
+            duration = max(config.TITLE_SLIDE_SECONDS, 1e-6)
+            self._title_slide += dt / duration
+            if self._title_slide >= 1.0:
+                self.restart(from_title=True)
+            return
+        self._title_pulse += dt * 2.1
+        if self.blade_active and len(self.blade_segments) >= 2:
+            hits = self.fruits.slice_with_blade(self.blade_segments)
+            if hits:
+                self._title_start_in = config.TITLE_START_DELAY
 
     def set_fingertip(
         self,
@@ -269,6 +441,9 @@ class Game:
         # get_time is ms since the previous tick(); first frame may be 0.
         dt_ms = self.clock.get_time()
         dt = (1.0 / self.target_fps) if dt_ms <= 0 else dt_ms / 1000.0
+        if self.on_title:
+            self._tick_title(dt)
+            return
         if self.paused and not self.game_over:
             return
         if self.game_over or self.time_left <= 0.0:
@@ -281,6 +456,9 @@ class Game:
         self.fruits.update(dt, self.width, self.height)
         if self.blade_active and len(self.blade_segments) >= 2:
             hits = self.fruits.slice_with_blade(self.blade_segments)
+            if self.fruits.hit_bomb:
+                self._end_game(bomb=True)
+                return
             if hits:
                 self._register_hits(hits, self.fruits.last_slice_at)
         if self._prev_blade_active and not self.blade_active:
@@ -288,6 +466,9 @@ class Game:
         self._prev_blade_active = self.blade_active
         self._tick_combo(dt)
         self._tick_floaters(dt)
+        if self._timer_hold > 0.0:
+            self._timer_hold = max(0.0, self._timer_hold - dt)
+            return
         self.time_left = max(0.0, self.time_left - dt)
         if self.time_left <= 0.0:
             self._end_game()
@@ -303,10 +484,10 @@ class Game:
             at = pos or (self.width * 0.5, self.height * 0.38)
             if new_mult > self.multiplier:
                 self.multiplier = new_mult
-                self._streak_pulse = 1.32
+                self._streak_pulse = 1.32 + 0.16 * combo_heat(self.streak)
             name = combo_name(self.streak)
             if name and name != previous_name:
-                self._add_floater(name, at[0], at[1], "combo")
+                self._add_floater(name, at[0], at[1], "combo", heat=combo_heat(self.streak))
             self.score += self.multiplier
 
     def _finish_swipe(self) -> None:
@@ -317,7 +498,7 @@ class Game:
         self.score += n * self.multiplier
         x, y = self.fruits.last_slice_at or (self.width * 0.5, self.height * 0.4)
         label = combo_name(n) or f"COMBO  x{n}"
-        self._add_floater(label, x, y, "combo")
+        self._add_floater(label, x, y, "combo", heat=combo_heat(n))
 
     def _tick_combo(self, dt: float) -> None:
         if self.streak <= 0:
@@ -329,9 +510,18 @@ class Game:
         self.multiplier = 1
         self._streak_pulse = 1.0
 
-    def _add_floater(self, text: str, x: float, y: float, kind: str) -> None:
+    def _add_floater(
+        self,
+        text: str,
+        x: float,
+        y: float,
+        kind: str,
+        heat: float = 0.0,
+    ) -> None:
         life = 0.95 if kind == "combo" else 0.7
-        self._floaters.append(_Floater(text=text, x=x, y=y, life=life, max_life=life, kind=kind))
+        self._floaters.append(
+            _Floater(text=text, x=x, y=y, life=life, max_life=life, kind=kind, heat=heat)
+        )
 
     def _tick_floaters(self, dt: float) -> None:
         keep: list[_Floater] = []
@@ -343,10 +533,17 @@ class Game:
         self._floaters = keep
         self._streak_pulse += (1.0 - self._streak_pulse) * min(dt * 10.0, 1.0)
 
-    def _end_game(self) -> None:
-        self._finish_swipe()
+    def _end_game(self, *, bomb: bool = False) -> None:
+        if bomb:
+            self._swipe_hits = 0
+        else:
+            self._finish_swipe()
         self.game_over = True
+        self.ended_by_bomb = bomb
         self.time_left = 0.0
+        self.streak = 0
+        self.multiplier = 1
+        self._floaters = []
         self.high_score = max(self.high_score, self.score)
 
     def render(self) -> None:
@@ -374,12 +571,26 @@ class Game:
                 1,
             )
 
+        if self.on_title:
+            if self._title_sliding:
+                self._draw_hud()
+            self.screen.blit(self._compose_title_layer(), (0, self._title_slide_offset()))
+            if not self._title_sliding:
+                if self.blade_active and len(self.blade_points) >= 2:
+                    self._draw_slash(self.blade_points)
+                elif self.fingertip is not None:
+                    x, y = int(self.fingertip[0]), int(self.fingertip[1])
+                    pygame.draw.circle(self.screen, (90, 90, 98), (x, y), 5, 1)
+            pygame.display.flip()
+            return
+
         for fruit in self.fruits.active_fruits:
             fruit.draw(self.screen)
         for piece in self.fruits.pieces:
             piece.draw(self.screen)
         self.fruits.splatter.draw(self.screen)
-        self._draw_floaters()
+        if not self.game_over:
+            self._draw_floaters()
 
         if not self.game_over and not self.paused:
             if self.blade_active and len(self.blade_points) >= 2:
@@ -499,28 +710,49 @@ class Game:
         # Sit under the score digits; ninja_text surfaces include outline pad.
         self.screen.blit(best, (margin_x, score_y + score.get_height() - 26))
 
-        if self.streak >= 2 and self._score_font is not None:
-            streak = self._ninja_text(self._score_font, f"x{self.streak}")
+        if not self.game_over and self.streak >= 2 and self._score_font is not None:
+            heat = combo_heat(self.streak)
+            top, bottom = combo_colors(heat)
+            rank_scale = 1.0 + 0.42 * heat
+            outline = 3 + int(round(2 * heat))
+            streak = self._ninja_text(
+                self._score_font,
+                f"x{self.streak}",
+                top=top,
+                bottom=bottom,
+                outline_width=outline,
+                shadow=4 + int(round(2 * heat)),
+            )
+            scale = rank_scale
             if self._streak_pulse > 1.02:
-                streak = pygame.transform.rotozoom(streak, 0.0, self._streak_pulse)
+                scale *= self._streak_pulse
+            if scale != 1.0:
+                streak = pygame.transform.rotozoom(streak, 0.0, scale)
             sx = self.width // 2 - streak.get_width() // 2
-            sy = margin_y - 6
+            sy = margin_y - 6 - int(8 * heat)
             self.screen.blit(streak, (sx, sy))
             name = combo_name(self.streak)
             if name and self._best_font is not None:
+                name_font = self._overlay_font if heat >= 0.5 and self._overlay_font is not None else self._best_font
                 shout = self._ninja_text(
-                    self._best_font,
+                    name_font,
                     name,
-                    top=(255, 224, 96),
-                    bottom=(255, 140, 28),
-                    outline_width=2,
-                    shadow=3,
+                    top=top,
+                    bottom=bottom,
+                    outline_width=2 + int(round(2 * heat)),
+                    shadow=3 + int(round(2 * heat)),
                 )
+                name_scale = rank_scale * (1.08 if heat >= 0.5 else 1.0)
+                if self._streak_pulse > 1.02:
+                    name_scale *= 1.0 + (self._streak_pulse - 1.0) * 0.6
+                if name_scale != 1.0:
+                    shout = pygame.transform.rotozoom(shout, 0.0, name_scale)
+                overlap = int((26 + 6 * heat) * rank_scale)
                 self.screen.blit(
                     shout,
                     (
                         self.width // 2 - shout.get_width() // 2,
-                        sy + streak.get_height() - 28,
+                        sy + streak.get_height() - overlap,
                     ),
                 )
 
@@ -548,9 +780,9 @@ class Game:
         y = int(self.height * 0.28)
         title = self._ninja_text(
             self._title_font,
-            "TIME'S UP",
-            top=(255, 120, 80),
-            bottom=(220, 36, 24),
+            "GAME OVER" if self.ended_by_bomb else "TIME'S UP",
+            top=(255, 90, 50) if self.ended_by_bomb else (255, 120, 80),
+            bottom=(180, 12, 10) if self.ended_by_bomb else (220, 36, 24),
             outline_width=4,
             shadow=6,
         )
@@ -586,20 +818,228 @@ class Game:
             outline_width=4,
             shadow=6,
         )
-        y = int(self.height * 0.38) - title.get_height() // 2
+        y = int(self.height * 0.36) - title.get_height() // 2
         self.screen.blit(title, (cx - title.get_width() // 2, y))
+        y += title.get_height() + max(int(self.height * 0.018), 8)
+        icon_size = max(int(self.height * 0.055), 28)
+        gap = max(int(icon_size * 0.28), 10)
+        rows = (
+            ("point", "POINT TO RESUME"),
+            ("fist", "FIST FOR MENU"),
+        )
+        parts = [
+            (self._gesture_icon(kind, icon_size), self._ninja_text(
+                self._hint_font,
+                text,
+                top=(240, 236, 228),
+                bottom=(196, 190, 180),
+                outline_width=2,
+                shadow=2,
+            ))
+            for kind, text in rows
+        ]
+        row_w = max(icon.get_width() + gap + label.get_width() for icon, label in parts)
+        x0 = cx - row_w // 2
+        line_gap = max(int(self.height * 0.05), 26)
+        for icon, label in parts:
+            row_h = max(icon.get_height(), label.get_height())
+            self.screen.blit(icon, (x0, y + (row_h - icon.get_height()) // 2))
+            self.screen.blit(
+                label,
+                (x0 + icon.get_width() + gap, y + (row_h - label.get_height()) // 2),
+            )
+            y += row_h + line_gap
+
+    def _gesture_icon(self, kind: str, size: int) -> pygame.Surface:
+        """Cream silhouette of a pointing hand or a fist, matching the HUD outline."""
+        key = ("gesture_icon", kind, size)
+        cached = self._text_cache.get(key)
+        if cached is not None:
+            return cached
+        ss = 4
+        inner = max(size, 8) * ss
+        fill = (248, 244, 236)
+        outline = (46, 18, 4)
+        ow = max(ss * 2, 4)
+        body = pygame.Surface((inner, inner), pygame.SRCALPHA)
+        self._paint_gesture(body, kind, fill, outline, ow)
+        shadow = pygame.Surface((inner, inner), pygame.SRCALPHA)
+        self._paint_gesture(shadow, kind, (0, 0, 0), (0, 0, 0), ow)
+        shadow.set_alpha(150)
+        pad = ow + ss * 2
+        out = pygame.Surface((inner + pad, inner + pad), pygame.SRCALPHA)
+        out.blit(shadow, (int(ss * 1.2), ss * 2))
+        out.blit(body, (0, 0))
+        icon = pygame.transform.smoothscale(out, (size, size))
+        self._text_cache[key] = icon
+        return icon
+
+    def _paint_gesture(
+        self,
+        surf: pygame.Surface,
+        kind: str,
+        fill: tuple[int, int, int],
+        outline: tuple[int, int, int],
+        ow: int,
+    ) -> None:
+        s = float(surf.get_width())
+
+        def rr(u: float, v: float, w: float, h: float, r: float) -> None:
+            x, y, ww, hh = u * s, v * s, w * s, h * s
+            rad = max(int(r * s), 1)
+            pygame.draw.rect(
+                surf,
+                outline,
+                (int(x - ow), int(y - ow), int(ww + 2 * ow), int(hh + 2 * ow)),
+                border_radius=rad + ow,
+            )
+            pygame.draw.rect(
+                surf,
+                fill,
+                (int(x), int(y), int(ww), int(hh)),
+                border_radius=rad,
+            )
+
+        def ell(u: float, v: float, w: float, h: float) -> None:
+            x, y, ww, hh = u * s, v * s, w * s, h * s
+            pygame.draw.ellipse(
+                surf,
+                outline,
+                (int(x - ow), int(y - ow), int(ww + 2 * ow), int(hh + 2 * ow)),
+            )
+            pygame.draw.ellipse(surf, fill, (int(x), int(y), int(ww), int(hh)))
+
+        def circ(u: float, v: float, r: float) -> None:
+            pygame.draw.circle(
+                surf,
+                outline,
+                (int(u * s), int(v * s)),
+                int(r * s) + ow,
+            )
+            pygame.draw.circle(surf, fill, (int(u * s), int(v * s)), max(int(r * s), 1))
+
+        if kind == "point":
+            rr(0.72, 0.40, 0.12, 0.22, 0.06)  # pinky
+            rr(0.60, 0.34, 0.14, 0.26, 0.07)  # ring
+            rr(0.46, 0.28, 0.16, 0.32, 0.08)  # middle
+            rr(0.22, 0.44, 0.54, 0.36, 0.16)  # palm
+            rr(0.28, 0.06, 0.20, 0.52, 0.10)  # index
+            ell(0.08, 0.50, 0.28, 0.22)  # thumb
+            rr(0.34, 0.76, 0.32, 0.16, 0.07)  # wrist
+            return
+        # Fist: knuckles up, thumb wrapped on the left.
+        rr(0.34, 0.70, 0.34, 0.18, 0.08)  # wrist
+        rr(0.20, 0.26, 0.60, 0.50, 0.22)  # body
+        circ(0.32, 0.28, 0.11)
+        circ(0.46, 0.24, 0.12)
+        circ(0.60, 0.24, 0.12)
+        circ(0.74, 0.30, 0.10)
+        ell(0.06, 0.42, 0.32, 0.26)
+
+    def _title_slide_offset(self) -> int:
+        """Ease-in drop so the title page hangs, then falls away."""
+        t = min(max(self._title_slide, 0.0), 1.0)
+        eased = t * t * t
+        return int(eased * self.height)
+
+    def _compose_title_layer(self) -> pygame.Surface:
+        layer = self._title_layer
+        if layer is None:
+            layer = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+            self._title_layer = layer
+        layer.fill((0, 0, 0, 0))
+        self._draw_title(layer)
+        for fruit in self.fruits.active_fruits:
+            if not self._title_sliding:
+                self._draw_title_focus(fruit, layer)
+            fruit.draw(layer)
+        for piece in self.fruits.pieces:
+            piece.draw(layer)
+        self.fruits.splatter.draw(layer)
+        return layer
+
+    def _draw_title_focus(self, fruit: Fruit, dest: pygame.Surface | None = None) -> None:
+        """Expanding gold rings — a 'slash here' cue that reads at a glance."""
+        cx, cy = int(fruit.x), int(fruit.y)
+        overlay = self._fx
+        if overlay is None:
+            overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 0))
+
+        breathe = 0.5 + 0.5 * math.sin(self._title_pulse)
+        halo_r = max(int(fruit.radius * (1.55 + 0.12 * breathe)), 8)
+        halo_size = halo_r * 2 + 2
+        halo = pygame.Surface((halo_size, halo_size), pygame.SRCALPHA)
+        hx = hy = halo_size // 2
+        xs = np.arange(halo_size, dtype=np.float32)[:, None]
+        ys = np.arange(halo_size, dtype=np.float32)[None, :]
+        dist = np.sqrt((xs - hx) ** 2 + (ys - hy) ** 2) / max(halo_r, 1)
+        fall = np.clip(1.0 - dist, 0.0, 1.0)
+        fall = fall * fall
+        alpha = (fall * (90.0 + 70.0 * breathe)).astype(np.uint8)
+        rgb = np.empty((halo_size, halo_size, 3), dtype=np.uint8)
+        rgb[..., 0] = 255
+        rgb[..., 1] = 220
+        rgb[..., 2] = 80
+        pygame.surfarray.blit_array(halo, rgb)
+        halo_a = pygame.surfarray.pixels_alpha(halo)
+        halo_a[:, :] = alpha
+        del halo_a
+        overlay.blit(halo, halo.get_rect(center=(cx, cy)))
+
+        for offset in (0.0, 0.5):
+            u = (self._title_pulse * 0.28 + offset) % 1.0
+            radius = int(fruit.radius * (1.12 + 1.05 * u))
+            fade = (1.0 - u) ** 1.35
+            ring_alpha = int(210 * fade)
+            if ring_alpha < 8 or radius < 2:
+                continue
+            pygame.draw.circle(
+                overlay,
+                (255, 232, 96, ring_alpha),
+                (cx, cy),
+                radius,
+                width=max(3, int(4 * fade + 1)),
+            )
+        target = dest if dest is not None else self.screen
+        target.blit(overlay, (0, 0))
+
+    def _draw_title(self, dest: pygame.Surface | None = None) -> None:
+        if self._title_font is None or self._hint_font is None:
+            return
+        target = dest if dest is not None else self.screen
+        dim = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        dim.fill((0, 0, 0, 110))
+        target.blit(dim, (0, 0))
+
+        cx = self.width // 2
+        title = self._ninja_text(
+            self._title_font,
+            "YUZU",
+            outline_width=4,
+            shadow=6,
+        )
         hint = self._ninja_text(
             self._hint_font,
-            "POINT TO RESUME",
+            "POINT A FINGER AND SLASH",
             top=(240, 236, 228),
             bottom=(196, 190, 180),
             outline_width=2,
             shadow=2,
         )
-        self.screen.blit(
-            hint,
-            (cx - hint.get_width() // 2, y + title.get_height() + 12),
-        )
+        layout = self._title_layout()
+        target.blit(title, (cx - title.get_width() // 2, int(layout["title_y"])))
+        target.blit(hint, (cx - hint.get_width() // 2, int(layout["hint_y"])))
+        if self.high_score > 0 and self._overlay_font is not None:
+            best = self._ninja_text(
+                self._overlay_font,
+                f"BEST  {self.high_score}",
+            )
+            fruit_bottom = layout["fruit_y"] + FRUIT_STYLES["yuzu"][1] * 1.2
+            target.blit(
+                best,
+                (cx - best.get_width() // 2, int(fruit_bottom + 4)),
+            )
 
     def _draw_floaters(self) -> None:
         font = self._overlay_font if self._overlay_font is not None else self._score_font
@@ -609,10 +1049,12 @@ class Game:
             t = max(floater.life / floater.max_life, 0.0)
             if floater.kind == "combo":
                 use = self._title_font or font
-                top, bottom = (255, 236, 96), (255, 140, 24)
+                top, bottom = combo_colors(floater.heat)
+                outline_w, shadow_w = 4 + int(round(2 * floater.heat)), 5 + int(round(2 * floater.heat))
             else:
                 use = font
                 top, bottom = (255, 210, 80), (255, 90, 30)
+                outline_w, shadow_w = 3, 3
             if use is None:
                 continue
             glyph = self._ninja_text(
@@ -620,10 +1062,10 @@ class Game:
                 floater.text,
                 top=top,
                 bottom=bottom,
-                outline_width=4 if floater.kind == "combo" else 3,
-                shadow=5 if floater.kind == "combo" else 3,
+                outline_width=outline_w,
+                shadow=shadow_w,
             )
-            scale = 0.82 + 0.28 * t
+            scale = (0.82 + 0.28 * t) * (1.0 + 0.38 * floater.heat)
             if scale != 1.0:
                 glyph = pygame.transform.rotozoom(glyph, 0.0, scale)
             glyph.set_alpha(int(255 * min(t / 0.25, 1.0) * min(t * 2.2, 1.0)))
